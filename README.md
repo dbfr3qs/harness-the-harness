@@ -39,6 +39,7 @@ In the REPL:
 | `/exit`    | Quit (Ctrl+C and Ctrl+D also exit cleanly) |
 | `/reset`   | Clear conversation history |
 | `/history` | Show message count, roles and block types |
+| `/policy`  | View or change the `web_fetch` site policy (see [Changing the policy from the REPL](#changing-the-policy-from-the-repl)) |
 
 Responses stream by default: text appears as the model writes it, and an animated row of dots (one to five and back) shows while it's waiting for the first output of each model call. The dots only appear when output is a terminal. Set `STREAM=0` to use plain non-streaming requests.
 
@@ -128,6 +129,26 @@ Hosts are compared after normalising case, punycode and a trailing dot.
 | `"maxFetchesPerMessage": 5` | Caps the fetches a single user message can trigger, including follow-up pages read with `offset`. Denied and declined fetches don't count. |
 
 An allowlist limits *where* requests go, not what they carry. An allowed site that records what's in its URLs (search pages, for example) could still receive data in a query string, which is what `maxUrlLength` narrows.
+
+#### Changing the policy from the REPL
+
+```
+/policy                          show the policy in effect, its rules (numbered), limits and session approvals
+/policy allow|ask|deny <pattern> add a rule, or change the action of the existing rule for <pattern>
+/policy remove <pattern | #>     remove a rule by pattern or number
+/policy default allow|ask|deny   action for sites no rule matches
+/policy limit url <n | off>      set or clear maxUrlLength
+/policy limit fetches <n | off>  set or clear maxFetchesPerMessage
+/policy save                     write the policy to its file (web-policy.json, or WEB_POLICY)
+/policy reload                   re-read the file, discarding unsaved changes
+```
+
+- **Changes take effect immediately** but stay in this session until you run `/policy save`. `/policy` shows when there are unsaved changes, and `/exit` warns once before discarding them.
+- **With no policy file,** you start from "ask before every fetch" (`default: ask`, no rules), and `/policy save` creates the file.
+- **Every change is validated** exactly like the file, so an invalid pattern is rejected with the same error and the policy is left unchanged.
+- **Saving** writes the same format as `web-policy.example.json`, atomically (temporary file, then rename). If you approved hosts with `[a]lways` this session, `/policy save` offers to keep them as `allow` rules. A host approved on a non-default port is saved in URL form, so the rule stays limited to that port.
+- **Only you can change the policy.** `/policy` commands are handled by the REPL and never reach the model, and the model has no tool that writes files.
+- **How the model finds out:** the tool definitions aren't changed mid-conversation, since that would rewrite the start of the prompt. Instead, your next message carries a short `[harness note: ...]` stating the new policy. The `web_fetch` description picks up the policy again after `/reset`, or straight away if the conversation is empty. Refusals always quote the policy in effect.
 
 **Safety of the file:** a policy file that exists but is invalid (bad JSON, unknown settings or actions, malformed patterns) stops the REPL at startup with an error, rather than running without a policy. Each decision is logged in the transcript with the rule that matched. The REPL banner shows which policy is in effect.
 

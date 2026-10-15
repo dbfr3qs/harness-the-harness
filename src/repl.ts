@@ -5,6 +5,7 @@ import { createAnthropicClient } from "./client.ts";
 import { ConfigError, loadConfig } from "./config.ts";
 import type { Config } from "./config.ts";
 import { createTranscriptLogger } from "./log.ts";
+import { createPolicyStore, runPolicyCommand } from "./policy_command.ts";
 import { createRegistry } from "./registry.ts";
 import { createSpinner } from "./spinner.ts";
 import { getTimeTool } from "./tools/get_time.ts";
@@ -148,7 +149,7 @@ async function main(): Promise<void> {
   };
   // web_fetch asks before every fetch, because a fetched URL can carry workspace data out.
   // "a" approves the host for the rest of the session.
-  const approvedHosts = new Set<string>();
+  const approvedHosts = new Map<string, string>(); // host -> origin, so /policy save can keep them as rules
   const confirmFetch = async (url: URL): Promise<boolean> => {
     if (approvedHosts.has(url.host)) return true;
     spinner.stop();
@@ -161,15 +162,16 @@ async function main(): Promise<void> {
       return false; // input closed: treat as declined
     }
     const allowed = answer === "y" || answer === "yes" || answer === "a" || answer === "always";
-    if (answer === "a" || answer === "always") approvedHosts.add(url.host);
+    if ((answer === "a" || answer === "always") && !approvedHosts.has(url.host)) approvedHosts.set(url.host, url.origin);
     transcript.log("tool_call", { approval: { url: url.href, answer, allowed } });
     return allowed;
   };
 
+  const policyStore = createPolicyStore(config.webPolicyPath, webPolicy);
   const webFetch = createWebFetchTool({
     confirm: confirmFetch,
     pageChars: Math.max(500, config.maxToolOutputChars - 500),
-    policy: webPolicy,
+    policy: () => policyStore.current(),
     onDecision: ({ url, stage, decision }) =>
       transcript.log("tool_call", { web_policy: { url, stage, action: decision.action, rule: decision.rule?.match ?? "default" } }),
   });
@@ -192,16 +194,20 @@ async function main(): Promise<void> {
   });
 
   console.log(
-    `harness · ${config.model} · ${registry.definitions().length} tool(s) · ${config.stream ? "streaming" : "non-streaming"} · /exit /reset /history`,
+    `harness · ${config.model} · ${registry.definitions().length} tool(s) · ${config.stream ? "streaming" : "non-streaming"} · /exit /reset /history /policy`,
   );
   console.log(`transcript: ${transcript.path}`);
   console.log(
     webPolicy
-      ? `web policy: ${config.webPolicyPath} (${webPolicy.policy.rules.length} rule(s), default ${webPolicy.policy.default})`
-      : "web policy: none (web_fetch asks before every fetch)",
+      ? `web policy: ${config.webPolicyPath} (${webPolicy.policy.rules.length} rule(s), default ${webPolicy.policy.default}) · /policy to view or change`
+      : "web policy: none (web_fetch asks before every fetch) · /policy to set one",
   );
   rl.setPrompt("> ");
   prompt();
+
+  // Set when /policy changes the policy mid-conversation; the next message carries a note to the model.
+  let policyChangedSinceDescription = false;
+  let exitWarned = false;
 
   for await (const raw of rl) {
     const input = raw.trim();
@@ -209,10 +215,43 @@ async function main(): Promise<void> {
       prompt();
       continue;
     }
-    if (input === "/exit") break;
+    if (input === "/exit") {
+      if (policyStore.dirty() && !exitWarned) {
+        exitWarned = true;
+        console.log("The web policy has unsaved changes. Run /policy save to keep them, or /exit again to discard them.");
+        prompt();
+        continue;
+      }
+      break;
+    }
+    exitWarned = false;
     if (input === "/reset") {
       messages.length = 0;
+      // With no history, the tool description can safely pick up the current policy.
+      webFetch.refreshDescription();
+      policyChangedSinceDescription = false;
       console.log("History cleared.");
+      prompt();
+      continue;
+    }
+    if (input === "/policy" || input.startsWith("/policy ")) {
+      const result = await runPolicyCommand(input.slice("/policy".length), {
+        store: policyStore,
+        approvals: approvedHosts,
+        ask: async (question) => {
+          try {
+            return await rl.question(question);
+          } catch {
+            return "";
+          }
+        },
+      });
+      console.log(result.output);
+      if (result.changed) {
+        transcript.log("tool_call", { web_policy_changed: { by: "user", policy: policyStore.current().policy } });
+        if (messages.length === 0) webFetch.refreshDescription();
+        else policyChangedSinceDescription = true;
+      }
       prompt();
       continue;
     }
@@ -223,7 +262,17 @@ async function main(): Promise<void> {
     }
 
     webFetch.newMessage();
-    const undo = addUserText(messages, input);
+    let text = input;
+    const noteAdded = policyChangedSinceDescription;
+    if (noteAdded) {
+      // Appended to history rather than editing the tool definitions, which would rewrite the prompt's start.
+      const summary = policyStore.current().policy.rules.length || policyStore.current().policy.default !== "ask"
+        ? policyStore.current().summary()
+        : "the user must approve each fetch";
+      text += `\n\n[harness note: the user changed the web_fetch site policy. It now reads: ${summary}. This replaces the policy in the web_fetch tool description.]`;
+      policyChangedSinceDescription = false;
+    }
+    const undo = addUserText(messages, text);
     const lengthAfterInput = messages.length;
     try {
       const result = await runAgent({
@@ -242,7 +291,10 @@ async function main(): Promise<void> {
       say(`[tokens: ${result.usage.input_tokens} in, ${result.usage.output_tokens} out · ${result.turns} model call(s)]`);
     } catch (err) {
       // Nothing from the model landed, so take back the user's text and keep history valid.
-      if (messages.length === lengthAfterInput) undo();
+      if (messages.length === lengthAfterInput) {
+        undo();
+        if (noteAdded) policyChangedSinceDescription = true; // resend the note with the next message
+      }
       const message = err instanceof Error ? err.message : String(err);
       transcript.log("error", { message });
       spinner.stop();
