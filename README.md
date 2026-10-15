@@ -67,8 +67,17 @@ After each answer the REPL prints that exchange's input and output token totals 
 | `get_time` | none                      | Local time in ISO 8601 with offset, plus the IANA time zone |
 | `list_dir` | `path` (default `.`)      | One entry per line, directories end in `/`; capped at 200 entries |
 | `read_file`| `path` (required)         | UTF-8 file contents; refuses files over 256 KB |
+| `web_fetch`| `url` (required), `offset` | Readable text of a web page (HTML converted to text, links kept as absolute URLs), in parts of up to `MAX_TOOL_OUTPUT_CHARS` minus 500 |
 
-All tools are read-only. File tools only see paths inside `WORKSPACE_ROOT`: `..` traversal, absolute paths elsewhere, and symlinks that escape are refused. `read_file` never reads `.env` or `.env.*` files, in any directory, whatever the case, or through a symlink, because they hold secrets such as the API key. `list_dir` still shows that they exist.
+All tools are read-only. `web_fetch` is the only one that reaches the network. File tools only see paths inside `WORKSPACE_ROOT`: `..` traversal, absolute paths elsewhere, and symlinks that escape are refused. `read_file` never reads `.env` or `.env.*` files, in any directory, whatever the case, or through a symlink, because they hold secrets such as the API key. `list_dir` still shows that they exist.
+
+### web_fetch safeguards
+
+A fetched URL can carry data out of the workspace (for example, file contents placed in a query string after the model reads a page containing injected instructions), so `web_fetch` has these protections:
+
+- **You approve every fetch.** The REPL shows the full URL and asks `[y]es / [n]o / [a]lways for <host>`. `a` approves that host until you exit. A declined fetch returns an error telling the model not to retry. If input is closed (piped stdin), fetches are declined.
+- **Public addresses only.** Loopback, private, link-local (including cloud metadata at `169.254.169.254`), CGNAT, multicast and reserved ranges are refused, including IPv4 written inside IPv6. The check runs inside the DNS lookup, so the address that was checked is the address connected to. Every redirect hop is checked again (up to 5 hops); you're only asked about the URL the model chose.
+- **Limits.** `http`/`https` only, no credentials in URLs, a 20-second timeout, a 2 MB download cap (stated in the result when hit), and text content types only (HTML, plain text, JSON, XML).
 
 ## Adding a new tool
 
@@ -129,7 +138,7 @@ src/
   log.ts          JSONL transcript writer
   repl.ts         CLI entry point
   spinner.ts      waiting animation
-  tools/          workspace sandboxing, get_time, list_dir, read_file
+  tools/          workspace sandboxing, get_time, list_dir, read_file, web_fetch
 test/             unit tests (fake model, fake fetch, temp dirs)
 ```
 

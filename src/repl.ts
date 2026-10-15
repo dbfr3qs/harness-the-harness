@@ -10,6 +10,7 @@ import { createSpinner } from "./spinner.ts";
 import { getTimeTool } from "./tools/get_time.ts";
 import { createListDirTool } from "./tools/list_dir.ts";
 import { createReadFileTool } from "./tools/read_file.ts";
+import { createWebFetchTool } from "./tools/web_fetch.ts";
 import type { AgentHooks } from "./agent.ts";
 import type { Message } from "./types.ts";
 
@@ -75,11 +76,13 @@ async function main(): Promise<void> {
     throw err;
   }
 
-  const registry = createRegistry([
-    getTimeTool,
-    createListDirTool(config.workspaceRoot),
-    createReadFileTool(config.workspaceRoot),
-  ]);
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  // With piped input, stdin can hit EOF (closing readline) while buffered lines are still being processed.
+  let closed = false;
+  rl.on("close", () => {
+    closed = true;
+  });
+
   const transcript = createTranscriptLogger(config.transcriptPath, { secrets: [config.apiKey] });
 
   // Streamed text arrives in pieces, so track whether the cursor is at the start of a line.
@@ -132,14 +135,37 @@ async function main(): Promise<void> {
       if (verbose) say(`  ← ${outcome.isError ? "error" : "ok"}: ${oneLine(outcome.content)}`);
     },
   };
+  // web_fetch asks before every fetch, because a fetched URL can carry workspace data out.
+  // "a" approves the host for the rest of the session.
+  const approvedHosts = new Set<string>();
+  const confirmFetch = async (url: URL): Promise<boolean> => {
+    if (approvedHosts.has(url.host)) return true;
+    spinner.stop();
+    endLine();
+    const shown = url.href.length > 500 ? `${url.href.slice(0, 500)}… (${url.href.length - 500} more chars)` : url.href;
+    let answer: string;
+    try {
+      answer = (await rl.question(`  Allow web_fetch of ${shown}?\n  [y]es / [n]o / [a]lways for ${url.host}: `)).trim().toLowerCase();
+    } catch {
+      return false; // input closed: treat as declined
+    }
+    const allowed = answer === "y" || answer === "yes" || answer === "a" || answer === "always";
+    if (answer === "a" || answer === "always") approvedHosts.add(url.host);
+    transcript.log("tool_call", { approval: { url: url.href, answer, allowed } });
+    return allowed;
+  };
+
+  const registry = createRegistry([
+    getTimeTool,
+    createListDirTool(config.workspaceRoot),
+    createReadFileTool(config.workspaceRoot),
+    createWebFetchTool({
+      confirm: confirmFetch,
+      pageChars: Math.max(500, config.maxToolOutputChars - 500),
+    }),
+  ]);
   const messages: Message[] = [];
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
-  // With piped input, stdin can hit EOF (closing readline) while buffered lines are still being processed.
-  let closed = false;
-  rl.on("close", () => {
-    closed = true;
-  });
   const prompt = () => {
     if (!closed) rl.prompt();
   };
