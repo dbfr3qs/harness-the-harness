@@ -40,15 +40,15 @@ export function createRegistry(tools: Tool[]) {
       return fail(`unknown tool "${name}". Valid tools are: ${valid}.`);
     }
 
-    const problem = validateInput(tool, input);
-    if (problem) return fail(problem);
-
+    // Everything runs inside the try, so a malformed schema or a handler that throws
+    // something strange still becomes an error result instead of escaping.
     try {
+      const problem = validateInput(tool, input);
+      if (problem) return fail(problem);
       const content = await tool.handler(input as Record<string, unknown>);
       return { content: String(content), isError: false };
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      return fail(message.replace(/^Error:\s*/, ""));
+      return fail(describeError(err).replace(/^Error:\s*/, ""));
     }
   }
 
@@ -59,6 +59,17 @@ export type Registry = ReturnType<typeof createRegistry>;
 
 function fail(message: string): ToolOutcome {
   return { content: `Error: ${message}`, isError: true };
+}
+
+// Never throws: a thrown value can be anything, including an object whose message getter
+// or toString throws.
+function describeError(err: unknown): string {
+  try {
+    const message: unknown = err instanceof Error ? err.message : err;
+    return typeof message === "string" ? message : String(message);
+  } catch {
+    return "the tool failed with an error that could not be described. Try a different approach.";
+  }
 }
 
 function describeType(value: unknown): string {
@@ -78,6 +89,12 @@ function validateInput(tool: Tool, input: unknown): string | undefined {
   if (!isPlainObject(input)) {
     const expected = Object.keys(props).join(", ") || "no properties";
     return `input for "${tool.name}" must be a JSON object, got ${describeType(input)}. Expected properties: ${expected}.`;
+  }
+
+  // Set by a client when the model's tool input could not be parsed (e.g. cut off mid-stream).
+  if (typeof input._invalidJson === "string") {
+    const raw = input._invalidJson.length > 200 ? `${input._invalidJson.slice(0, 200)}…` : input._invalidJson;
+    return `the input for "${tool.name}" was not valid JSON (it may have been cut off): ${raw}. Call "${tool.name}" again with a complete JSON object.`;
   }
 
   const missing = (schema.required ?? []).filter((key) => input[key] === undefined);

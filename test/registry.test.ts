@@ -99,3 +99,44 @@ test("invalid tool names throw at creation", () => {
     assert.throws(() => createRegistry([{ ...echo, name }]), /Invalid tool name/);
   }
 });
+
+test("unparseable input from the client (_invalidJson) is an error, even with no required keys", async () => {
+  const out = await registry.dispatch("boom", { _invalidJson: '{"path": "pack' });
+  assert.equal(out.isError, true);
+  assert.match(out.content, /^Error: the input for "boom" was not valid JSON .*\{"path": "pack\. Call "boom" again/);
+});
+
+test("dispatch never throws, whatever a handler throws or returns", async () => {
+  const throwingGetter = new Error("x");
+  Object.defineProperty(throwingGetter, "message", { get: () => { throw new Error("getter boom"); } });
+  const nonStringMessage = new Error("x");
+  Object.defineProperty(nonStringMessage, "message", { value: { code: 42 } });
+  const badToString = { toString: () => { throw new Error("toString boom"); } };
+
+  const weird: [string, () => Promise<string>][] = [
+    ["null-prototype object", async () => { throw Object.create(null); }],
+    ["Error with a throwing message getter", async () => { throw throwingGetter; }],
+    ["Error with a non-string message", async () => { throw nonStringMessage; }],
+    ["thrown string", async () => { throw "plain string"; }],
+    ["thrown undefined", async () => { throw undefined; }],
+    ["return value with a throwing toString", async () => badToString as unknown as string],
+  ];
+  for (const [label, handler] of weird) {
+    const reg = createRegistry([defineTool({ name: "weird", description: "d", input_schema: { type: "object" }, handler })]);
+    const out = await reg.dispatch("weird", {});
+    assert.equal(out.isError, true, label);
+    assert.match(out.content, /^Error: /, label);
+  }
+});
+
+test("a malformed schema becomes an error result instead of throwing", async () => {
+  const broken = defineTool({
+    name: "broken",
+    description: "d",
+    input_schema: { type: "object", required: "path" as unknown as string[] },
+    handler: async () => "unreachable",
+  });
+  const out = await createRegistry([broken]).dispatch("broken", {});
+  assert.equal(out.isError, true);
+  assert.match(out.content, /^Error: /);
+});
