@@ -40,6 +40,8 @@ In the REPL:
 | `/reset`   | Clear conversation history |
 | `/history` | Show message count, roles and block types |
 
+Responses stream by default: text appears as the model writes it, and an animated row of dots (one to five and back) shows while it's waiting for the first output of each model call. The dots only appear when output is a terminal. Set `STREAM=0` to use plain non-streaming requests.
+
 After each answer the REPL prints that exchange's input and output token totals and the number of model calls. If the loop stops early, it says why: `MAX_TURNS` reached, `MAX_TOKENS` cut-off, or a refusal. After `MAX_TURNS`, send another message and the model continues where it left off.
 
 ## Environment variables
@@ -51,8 +53,9 @@ After each answer the REPL prints that exchange's input and output token totals 
 | `ANTHROPIC_MODEL`       | `claude-sonnet-5-5`               | Model ID (`claude-haiku-5-5` is cheaper for testing) |
 | `MAX_TOKENS`            | `4096`                            | `max_tokens` per request |
 | `MAX_TURNS`             | `10`                              | Model calls per user message |
-| `TIMEOUT_MS`            | `120000`                          | Per-request timeout |
-| `MAX_RETRIES`           | `3`                               | Retries on network errors, timeouts, 429, 500 and 529 |
+| `TIMEOUT_MS`            | `120000`                          | Idle timeout: the longest wait for the next piece of a response (the whole response when not streaming) |
+| `MAX_RETRIES`           | `3`                               | Retries on network errors, timeouts, 429, 500 and 529 (and overloaded errors mid-stream, until text has been shown) |
+| `STREAM`                | `true`                            | Stream responses (SSE); `0`/`false` for non-streaming requests |
 | `MAX_TOOL_OUTPUT_CHARS` | `8000`                            | Tool results longer than this are truncated with a visible marker |
 | `WORKSPACE_ROOT`        | current directory                 | Sandbox root for the file tools |
 | `TRANSCRIPT_PATH`       | `./transcripts/<timestamp>.jsonl` | JSONL transcript file |
@@ -119,16 +122,20 @@ Each REPL session appends one JSON object per line to `TRANSCRIPT_PATH`:
 src/
   types.ts        content block, message, tool and response types
   config.ts       settings from env vars with defaults
-  client.ts       createAnthropicClient(): fetch + timeout + retry
+  client.ts       createAnthropicClient(): fetch + timeout + retry, streaming or not
+  sse.ts          SSE parsing; rebuilds the streamed message exactly as the API would return it
   registry.ts     defineTool, createRegistry, dispatch
   agent.ts        runAgent(): the loop
   log.ts          JSONL transcript writer
   repl.ts         CLI entry point
+  spinner.ts      waiting animation
   tools/          workspace sandboxing, get_time, list_dir, read_file
 test/             unit tests (fake model, fake fetch, temp dirs)
 ```
 
 Dependencies flow one way: `repl` → `agent` → `client` and `registry` → `tools`. `agent.ts` depends only on the `ModelFn` type, so another provider can be added as a new client without touching the loop.
+
+Streaming lives entirely in the client. It rebuilds the stream into the same message object a non-streaming request returns, including thinking signatures and tool inputs, so the agent loop and history handling are identical in both modes. A stream that fails before any text is shown is retried; one that fails after text has appeared is reported as an error instead, so an answer is never printed twice. An unknown delta type is an error rather than being skipped, because a block that can't be rebuilt exactly would corrupt the history.
 
 ## API check (raw curl)
 

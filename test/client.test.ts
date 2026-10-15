@@ -12,6 +12,7 @@ const config: ClientConfig = {
   maxTokens: 100,
   timeoutMs: 1000,
   maxRetries: 2,
+  stream: false,
 };
 const req: ModelRequest = { system: "sys", messages: [{ role: "user", content: "hi" }], tools: [] };
 const okBody = {
@@ -120,7 +121,7 @@ test("network errors retry, then fail after maxRetries + 1 attempts", async () =
 test("timeouts are retried and reported", async () => {
   const timeout = new DOMException("The operation timed out.", "TimeoutError");
   const { model } = client([timeout, timeout, timeout]);
-  await assert.rejects(model(req), /timed out after 1000 ms/);
+  await assert.rejects(model(req), /timed out \(no data for 1000 ms\)/);
 });
 
 test("a response without a content array is a descriptive error", async () => {

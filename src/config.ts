@@ -8,6 +8,7 @@ export interface Config {
   maxTurns: number;
   timeoutMs: number;
   maxRetries: number;
+  stream: boolean;
   maxToolOutputChars: number;
   workspaceRoot: string;
   transcriptPath: string;
@@ -23,6 +24,14 @@ function positiveInt(env: NodeJS.ProcessEnv, name: string, fallback: number, min
     throw new ConfigError(`${name} must be an integer >= ${min} (got "${raw}")`);
   }
   return n;
+}
+
+function bool(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
+  const raw = env[name]?.trim().toLowerCase();
+  if (raw === undefined || raw === "") return fallback;
+  if (["1", "true", "yes", "on"].includes(raw)) return true;
+  if (["0", "false", "no", "off"].includes(raw)) return false;
+  throw new ConfigError(`${name} must be true or false (got "${env[name]}")`);
 }
 
 function timestamp(): string {
@@ -45,6 +54,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxTurns: positiveInt(env, "MAX_TURNS", 10),
     timeoutMs: positiveInt(env, "TIMEOUT_MS", 120_000),
     maxRetries: positiveInt(env, "MAX_RETRIES", 3, 0),
+    stream: bool(env, "STREAM", true),
     maxToolOutputChars: positiveInt(env, "MAX_TOOL_OUTPUT_CHARS", 8000),
     workspaceRoot: env.WORKSPACE_ROOT || process.cwd(),
     transcriptPath: env.TRANSCRIPT_PATH || join("transcripts", `${timestamp()}.jsonl`),

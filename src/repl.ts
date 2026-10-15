@@ -6,6 +6,7 @@ import { ConfigError, loadConfig } from "./config.ts";
 import type { Config } from "./config.ts";
 import { createTranscriptLogger } from "./log.ts";
 import { createRegistry } from "./registry.ts";
+import { createSpinner } from "./spinner.ts";
 import { getTimeTool } from "./tools/get_time.ts";
 import { createListDirTool } from "./tools/list_dir.ts";
 import { createReadFileTool } from "./tools/read_file.ts";
@@ -80,22 +81,55 @@ async function main(): Promise<void> {
     createReadFileTool(config.workspaceRoot),
   ]);
   const transcript = createTranscriptLogger(config.transcriptPath, { secrets: [config.apiKey] });
+
+  // Streamed text arrives in pieces, so track whether the cursor is at the start of a line.
+  // The spinner redraws its line with \r, so it must only ever start on an empty line.
+  const spinner = createSpinner();
+  let atLineStart = true;
+  const write = (text: string) => {
+    if (text === "") return;
+    process.stdout.write(text);
+    atLineStart = text.endsWith("\n");
+  };
+  const endLine = () => {
+    if (!atLineStart) write("\n");
+  };
+  const say = (line: string) => {
+    spinner.stop();
+    endLine();
+    write(`${line}\n`);
+  };
+
   const model = createAnthropicClient(config, {
-    onRequest: (body) => transcript.log("request", body),
+    onRequest: (body) => {
+      transcript.log("request", body);
+      endLine();
+      spinner.start();
+    },
     onRetry: (info) => {
       transcript.log("error", { message: `retrying: ${info.reason}`, ...info });
+      spinner.stop();
+      endLine();
       console.error(`  [retry ${info.attempt}/${config.maxRetries} in ${info.delayMs} ms: ${info.reason}]`);
+      spinner.start();
+    },
+    onTextDelta: (text) => {
+      spinner.stop();
+      write(text);
     },
   });
   const hooks: AgentHooks = {
-    onResponse: (res) => transcript.log("response", res),
+    onResponse: (res) => {
+      spinner.stop();
+      transcript.log("response", res);
+    },
     onToolCall: (call) => {
       transcript.log("tool_call", { id: call.id, name: call.name, input: call.input });
-      if (verbose) console.log(`  → ${call.name} ${JSON.stringify(call.input)}`);
+      if (verbose) say(`  → ${call.name} ${JSON.stringify(call.input)}`);
     },
     onToolResult: (call, outcome) => {
       transcript.log("tool_result", { tool_use_id: call.id, name: call.name, ...outcome });
-      if (verbose) console.log(`  ← ${outcome.isError ? "error" : "ok"}: ${oneLine(outcome.content)}`);
+      if (verbose) say(`  ← ${outcome.isError ? "error" : "ok"}: ${oneLine(outcome.content)}`);
     },
   };
   const messages: Message[] = [];
@@ -110,12 +144,15 @@ async function main(): Promise<void> {
     if (!closed) rl.prompt();
   };
   rl.on("SIGINT", () => {
+    spinner.stop();
     console.log("\nBye.");
     rl.close();
     void transcript.flush().finally(() => process.exit(0));
   });
 
-  console.log(`harness · ${config.model} · ${registry.definitions().length} tool(s) · /exit /reset /history`);
+  console.log(
+    `harness · ${config.model} · ${registry.definitions().length} tool(s) · ${config.stream ? "streaming" : "non-streaming"} · /exit /reset /history`,
+  );
   console.log(`transcript: ${transcript.path}`);
   rl.setPrompt("> ");
   prompt();
@@ -151,17 +188,18 @@ async function main(): Promise<void> {
         maxToolOutputChars: config.maxToolOutputChars,
         hooks,
       });
-      if (result.finalText) console.log(result.finalText);
+      // When streaming, the text has already been printed as it arrived.
+      if (!config.stream && result.finalText) say(result.finalText);
       const notice = stopNotice(result, config);
-      if (notice) console.log(notice);
-      console.log(
-        `[tokens: ${result.usage.input_tokens} in, ${result.usage.output_tokens} out · ${result.turns} model call(s)]`,
-      );
+      if (notice) say(notice);
+      say(`[tokens: ${result.usage.input_tokens} in, ${result.usage.output_tokens} out · ${result.turns} model call(s)]`);
     } catch (err) {
       // Nothing from the model landed, so take back the user's text and keep history valid.
       if (messages.length === lengthAfterInput) undo();
       const message = err instanceof Error ? err.message : String(err);
       transcript.log("error", { message });
+      spinner.stop();
+      endLine();
       console.error(`Error: ${message}`);
     }
     prompt();

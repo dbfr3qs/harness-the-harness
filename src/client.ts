@@ -1,14 +1,16 @@
 import type { Config } from "./config.ts";
+import { createMessageAccumulator, parseSse, StreamErrorEvent, StreamProtocolError } from "./sse.ts";
 import type { MessageResponse, ModelFn, ModelRequest } from "./types.ts";
 
 export type ClientConfig = Pick<
   Config,
-  "apiKey" | "baseUrl" | "model" | "maxTokens" | "timeoutMs" | "maxRetries"
+  "apiKey" | "baseUrl" | "model" | "maxTokens" | "timeoutMs" | "maxRetries" | "stream"
 >;
 
 export interface ClientHooks {
   onRequest?: (body: unknown) => void; // request body only, never headers
   onRetry?: (info: { attempt: number; delayMs: number; reason: string }) => void;
+  onTextDelta?: (text: string) => void; // streaming only: text as it arrives
 }
 
 export interface ClientDeps {
@@ -17,6 +19,7 @@ export interface ClientDeps {
 }
 
 const RETRYABLE_STATUS = new Set([429, 500, 529]);
+const RETRYABLE_STREAM_ERRORS = new Set(["overloaded_error", "api_error", "rate_limit_error"]);
 const BASE_DELAY_MS = 500;
 
 type Attempt =
@@ -35,33 +38,106 @@ export function createAnthropicClient(
   // Belt and braces: no error message leaves this module containing the key.
   const redact = (s: string) => s.split(config.apiKey).join("[redacted]");
 
-  async function attempt(payload: string): Promise<Attempt> {
-    let res: Response;
-    let text: string;
+  // `shown` tracks whether any text reached onTextDelta during this call. Once it has,
+  // a retry would print the answer twice, so failures after that point are fatal.
+  async function attempt(payload: string, shown: { value: boolean }): Promise<Attempt> {
+    // Idle timeout: aborts when nothing arrives for timeoutMs. For a non-streaming request
+    // this is the whole request; for a stream it is the longest allowed gap between chunks.
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const touch = () => {
+      clearTimeout(timer);
+      timer = setTimeout(
+        () => controller.abort(new DOMException(`no data for ${config.timeoutMs} ms`, "TimeoutError")),
+        config.timeoutMs,
+      );
+    };
+
     try {
-      res = await doFetch(url, {
-        method: "POST",
-        headers: {
-          "x-api-key": config.apiKey,
-          "anthropic-version": "2023-06-01",
-          "content-type": "application/json",
-        },
-        body: payload,
-        signal: AbortSignal.timeout(config.timeoutMs),
-      });
-      text = await res.text();
+      touch();
+      let res: Response;
+      try {
+        res = await doFetch(url, {
+          method: "POST",
+          headers: {
+            "x-api-key": config.apiKey,
+            "anthropic-version": "2023-06-01",
+            "content-type": "application/json",
+          },
+          body: payload,
+          signal: controller.signal,
+        });
+      } catch (err) {
+        return { kind: "retry", reason: describeNetworkError(err, config.timeoutMs) };
+      }
+
+      if (!res.ok) {
+        let text = "";
+        try {
+          text = await res.text();
+        } catch {
+          // the status alone is enough to act on
+        }
+        const detail = `HTTP ${res.status}${errorDetail(text)}`;
+        if (RETRYABLE_STATUS.has(res.status)) {
+          return { kind: "retry", reason: detail, retryAfterMs: parseRetryAfter(res.headers.get("retry-after")) };
+        }
+        const hint = res.status === 401 ? " (check ANTHROPIC_API_KEY)" : "";
+        throw new Error(`Anthropic API error: ${detail}${hint}`);
+      }
+
+      if (!config.stream) {
+        let text: string;
+        try {
+          text = await res.text();
+        } catch (err) {
+          return { kind: "retry", reason: describeNetworkError(err, config.timeoutMs) };
+        }
+        return { kind: "ok", response: parseResponse(text) };
+      }
+
+      return await readStream(res, touch, shown);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function readStream(res: Response, touch: () => void, shown: { value: boolean }): Promise<Attempt> {
+    if (!res.body) return { kind: "retry", reason: "stream response had no body" };
+    const acc = createMessageAccumulator();
+    const failed = (reason: string): Attempt => {
+      if (shown.value) throw new Error(`Anthropic API stream failed after output began: ${reason}`);
+      return { kind: "retry", reason };
+    };
+
+    try {
+      for await (const sse of parseSse(res.body, touch)) {
+        let ev: Record<string, unknown>;
+        try {
+          ev = JSON.parse(sse.data);
+        } catch {
+          throw new StreamProtocolError(`stream sent invalid JSON: ${sse.data.slice(0, 300)}`);
+        }
+        const text = acc.apply(ev);
+        if (text) {
+          shown.value = true;
+          hooks.onTextDelta?.(text);
+        }
+      }
     } catch (err) {
-      return { kind: "retry", reason: describeNetworkError(err, config.timeoutMs) };
+      if (err instanceof StreamErrorEvent) {
+        if (RETRYABLE_STREAM_ERRORS.has(err.errorType)) return failed(`stream error ${err.message}`);
+        throw new Error(`Anthropic API error in stream: ${err.message}`);
+      }
+      if (err instanceof StreamProtocolError) throw new Error(`Anthropic API stream error: ${err.message}`);
+      return failed(describeNetworkError(err, config.timeoutMs));
     }
 
-    if (res.ok) return { kind: "ok", response: parseResponse(text) };
-
-    const detail = `HTTP ${res.status}${errorDetail(text)}`;
-    if (RETRYABLE_STATUS.has(res.status)) {
-      return { kind: "retry", reason: detail, retryAfterMs: parseRetryAfter(res.headers.get("retry-after")) };
+    try {
+      return { kind: "ok", response: acc.finish() };
+    } catch (err) {
+      return failed(err instanceof Error ? err.message : String(err));
     }
-    const hint = res.status === 401 ? " (check ANTHROPIC_API_KEY)" : "";
-    throw new Error(`Anthropic API error: ${detail}${hint}`);
   }
 
   return async function callModel(req: ModelRequest): Promise<MessageResponse> {
@@ -72,13 +148,15 @@ export function createAnthropicClient(
       messages: req.messages,
     };
     if (req.tools.length > 0) body.tools = req.tools;
+    if (config.stream) body.stream = true;
     hooks.onRequest?.(body);
     const payload = JSON.stringify(body);
+    const shown = { value: false };
 
     for (let n = 0; ; n++) {
       let result: Attempt;
       try {
-        result = await attempt(payload);
+        result = await attempt(payload, shown);
       } catch (err) {
         throw new Error(redact(err instanceof Error ? err.message : String(err)));
       }
@@ -111,7 +189,7 @@ function parseRetryAfter(value: string | null): number | undefined {
 
 function describeNetworkError(err: unknown, timeoutMs: number): string {
   if (err instanceof Error) {
-    if (err.name === "TimeoutError" || err.name === "AbortError") return `timed out after ${timeoutMs} ms`;
+    if (err.name === "TimeoutError" || err.name === "AbortError") return `timed out (no data for ${timeoutMs} ms)`;
     const cause = err.cause instanceof Error ? `: ${err.cause.message}` : "";
     return `network error: ${err.message}${cause}`;
   }
