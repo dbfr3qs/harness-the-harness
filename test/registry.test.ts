@@ -1,0 +1,101 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { createRegistry, defineTool } from "../src/registry.ts";
+
+const echo = defineTool({
+  name: "echo",
+  description: "Echo the text back.",
+  input_schema: {
+    type: "object",
+    properties: {
+      text: { type: "string" },
+      times: { type: "integer" },
+      loud: { type: "boolean" },
+      scale: { type: "number" },
+      mode: { type: "string", enum: ["plain", "fancy"] },
+    },
+    required: ["text"],
+  },
+  handler: async (input) => String(input.text).repeat(Number(input.times ?? 1)),
+});
+
+const boom = defineTool({
+  name: "boom",
+  description: "Always fails.",
+  input_schema: { type: "object", properties: {} },
+  handler: async () => {
+    throw new Error("disk on fire; try again later");
+  },
+});
+
+const registry = createRegistry([echo, boom]);
+
+test("definitions are Claude-format with no handler", () => {
+  const defs = registry.definitions();
+  assert.equal(defs.length, 2);
+  assert.deepEqual(Object.keys(defs[0]!).sort(), ["description", "input_schema", "name"]);
+  assert.equal(defs[0]!.name, "echo");
+});
+
+test("success runs the handler", async () => {
+  const out = await registry.dispatch("echo", { text: "ab", times: 2 });
+  assert.deepEqual(out, { content: "abab", isError: false });
+});
+
+test("unknown tool lists the valid names", async () => {
+  const out = await registry.dispatch("nope", {});
+  assert.equal(out.isError, true);
+  assert.match(out.content, /^Error: unknown tool "nope"/);
+  assert.match(out.content, /echo, boom/);
+});
+
+for (const [label, input, got] of [
+  ["null", null, "null"],
+  ["array", ["text"], "array"],
+  ["string", "hello", "string"],
+] as const) {
+  test(`non-object input (${label}) is an error`, async () => {
+    const out = await registry.dispatch("echo", input);
+    assert.equal(out.isError, true);
+    assert.match(out.content, /^Error: input for "echo" must be a JSON object/);
+    assert.match(out.content, new RegExp(`got ${got}`));
+  });
+}
+
+test("missing required key names the key", async () => {
+  const out = await registry.dispatch("echo", { times: 2 });
+  assert.equal(out.isError, true);
+  assert.match(out.content, /^Error: missing required key\(s\) for "echo": text/);
+});
+
+for (const [key, value, pattern] of [
+  ["text", 42, /"text" must be a string, got number/],
+  ["times", 1.5, /"times" must be an integer, got 1.5/],
+  ["times", "2", /"times" must be an integer, got string/],
+  ["loud", "yes", /"loud" must be a boolean, got string/],
+  ["scale", "big", /"scale" must be a number, got string/],
+  ["mode", "weird", /"mode" must be one of "plain", "fancy"/],
+] as const) {
+  test(`wrong type for ${key} (${JSON.stringify(value)}) is an error`, async () => {
+    const input = { text: "x", [key]: value };
+    const out = await registry.dispatch("echo", input);
+    assert.equal(out.isError, true);
+    assert.match(out.content, /^Error: /);
+    assert.match(out.content, pattern);
+  });
+}
+
+test("handler exception becomes an error result", async () => {
+  const out = await registry.dispatch("boom", {});
+  assert.deepEqual(out, { content: "Error: disk on fire; try again later", isError: true });
+});
+
+test("duplicate tool names throw at creation", () => {
+  assert.throws(() => createRegistry([echo, echo]), /Duplicate tool name "echo"/);
+});
+
+test("invalid tool names throw at creation", () => {
+  for (const name of ["", "has space", "dot.name", "x".repeat(129)]) {
+    assert.throws(() => createRegistry([{ ...echo, name }]), /Invalid tool name/);
+  }
+});
