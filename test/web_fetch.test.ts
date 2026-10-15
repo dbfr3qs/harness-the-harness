@@ -6,6 +6,7 @@ import type { AddressInfo } from "node:net";
 import { gzipSync } from "node:zlib";
 import { createRegistry } from "../src/registry.ts";
 import { createWebFetchTool, decodeEntities, htmlToText, isPublicAddress } from "../src/tools/web_fetch.ts";
+import { compileWebPolicy } from "../src/tools/web_policy.ts";
 
 // --- a local server ------------------------------------------------------------
 
@@ -39,6 +40,8 @@ before(async () => {
       case "/redirect-private": return send(302, "text/plain", "", { location: "http://10.0.0.1/secret" });
       case "/redirect-scheme": return send(302, "text/plain", "", { location: "file:///etc/passwd" });
       case "/loop": return send(302, "text/plain", "", { location: "/loop" });
+      case "/redirect-elsewhere":
+        return send(302, "text/plain", "", { location: `http://localhost:${req.socket.localPort}/page` });
       case "/long": return send(200, "text/plain", "abcdefghij".repeat(30));
       case "/huge": return send(200, "text/plain", "x".repeat(5000));
       case "/gzip": return send(200, "text/plain", gzipSync("compressed text"), { "content-encoding": "gzip" });
@@ -58,8 +61,7 @@ after(async () => {
 
 function tool(opts: Partial<Parameters<typeof createWebFetchTool>[0]> = {}) {
   const asked: string[] = [];
-  const registry = createRegistry([
-    createWebFetchTool({
+  const webFetch = createWebFetchTool({
       confirm: async (url) => {
         asked.push(url.href);
         return true;
@@ -67,9 +69,14 @@ function tool(opts: Partial<Parameters<typeof createWebFetchTool>[0]> = {}) {
       pageChars: 100,
       allowAddress: (ip) => ip === "127.0.0.1", // the local test server only
       ...opts,
-    }),
-  ]);
-  return { fetch: (input: Record<string, unknown>) => registry.dispatch("web_fetch", input), asked };
+  });
+  const registry = createRegistry([webFetch]);
+  return {
+    fetch: (input: Record<string, unknown>) => registry.dispatch("web_fetch", input),
+    asked,
+    webFetch,
+    description: registry.definitions()[0]!.description,
+  };
 }
 
 // --- address checks --------------------------------------------------------------
@@ -235,4 +242,110 @@ test("decodeEntities handles named, decimal and hex entities and leaves unknown 
 test("htmlToText drops javascript: and mailto: links but keeps their text", () => {
   const { text } = htmlToText('<a href="javascript:void(0)">Click</a> <a href="mailto:a@b.c">Mail</a>', new URL("https://x.test/"));
   assert.equal(text, "Click Mail");
+});
+
+// --- site policy ------------------------------------------------------------------------------
+
+const local = () => new URL(base).host; // 127.0.0.1:<port>
+
+test("policy allow fetches without asking; deny refuses without asking or connecting", async () => {
+  const policy = compileWebPolicy({ default: "deny", rules: [{ match: `http://${local()}/page`, action: "allow" }] });
+  const decisions: string[] = [];
+  const { fetch, asked } = tool({
+    policy,
+    onDecision: ({ stage, decision }) => decisions.push(`${stage}:${decision.action}:${decision.rule?.match ?? "default"}`),
+  });
+
+  const ok = await fetch({ url: `${base}/page` });
+  assert.equal(ok.isError, false);
+  assert.deepEqual(asked, [], "allow skips the prompt");
+
+  const before = hits.length;
+  const denied = await fetch({ url: `${base}/json` });
+  assert.equal(denied.isError, true);
+  assert.match(denied.content, /is not on the web policy's list of allowed sites\. allowed without asking: .*any other site is refused\. Do not retry/);
+  assert.equal(hits.length, before, "a denied URL never reaches the server");
+  assert.deepEqual(asked, []);
+  assert.deepEqual(decisions, [`request:allow:http://${local()}/page`, "request:deny:default"]);
+});
+
+test("an explicit deny rule names the rule, and ask rules still prompt", async () => {
+  const policy = compileWebPolicy({
+    default: "deny",
+    rules: [
+      { match: "127.0.0.1", action: "ask" },
+      { match: `http://${local()}/missing`, action: "deny" },
+    ],
+  });
+  const { fetch, asked } = tool({ policy });
+  const blocked = await fetch({ url: `${base}/missing` });
+  assert.match(blocked.content, /is blocked by the web policy \(rule "http:\/\/127\.0\.0\.1:\d+\/missing"\)/);
+  assert.equal((await fetch({ url: `${base}/json` })).isError, false);
+  assert.deepEqual(asked, [`${base}/json`]);
+});
+
+test("redirects are checked against the policy on every hop", async () => {
+  // Allowed start, redirect to a host that is not allowed: refused before connecting to it.
+  const strict = tool({ policy: compileWebPolicy({ rules: [{ match: "127.0.0.1", action: "allow" }] }) });
+  const out = await strict.fetch({ url: `${base}/redirect-elsewhere` });
+  assert.equal(out.isError, true);
+  assert.match(out.content, /redirected to http:\/\/localhost:\d+\/page, but localhost:\d+ is not on the web policy's list/);
+
+  // Same-host redirects are fine for an approved "ask" site.
+  const asking = tool({ policy: compileWebPolicy({ rules: [{ match: "127.0.0.1", action: "ask" }] }) });
+  assert.equal((await asking.fetch({ url: `${base}/redirect` })).isError, false);
+  assert.deepEqual(asking.asked, [`${base}/redirect`]);
+
+  // A redirect from an "allow" path to an "ask" path on the same host is fine too...
+  const mixed = tool({
+    policy: compileWebPolicy({ rules: [{ match: `http://${local()}/redirect`, action: "allow" }, { match: "127.0.0.1", action: "ask" }] }),
+  });
+  assert.equal((await mixed.fetch({ url: `${base}/redirect` })).isError, false);
+  assert.deepEqual(mixed.asked, [], "no prompt mid-redirect");
+
+  // ...but a redirect into a denied path is not.
+  const denyTarget = tool({
+    policy: compileWebPolicy({ rules: [{ match: "127.0.0.1", action: "allow" }, { match: `http://${local()}/page`, action: "deny" }] }),
+  });
+  const refused = await denyTarget.fetch({ url: `${base}/redirect` });
+  assert.match(refused.content, /redirected to .*\/page, but .* is blocked by the web policy/);
+});
+
+test("maxUrlLength refuses long URLs before asking", async () => {
+  const policy = compileWebPolicy({ default: "ask", maxUrlLength: 40 });
+  const { fetch, asked } = tool({ policy });
+  const out = await fetch({ url: `${base}/page?data=${"x".repeat(50)}` });
+  assert.equal(out.isError, true);
+  assert.match(out.content, /the URL is \d+ characters; the web policy allows at most 40/);
+  assert.deepEqual(asked, []);
+});
+
+test("maxFetchesPerMessage caps fetches until newMessage() resets the count", async () => {
+  const policy = compileWebPolicy({ rules: [{ match: "127.0.0.1", action: "allow" }], maxFetchesPerMessage: 2 });
+  const { fetch, webFetch } = tool({ policy });
+  assert.equal((await fetch({ url: `${base}/json` })).isError, false);
+  assert.equal((await fetch({ url: `${base}/json` })).isError, false);
+  const third = await fetch({ url: `${base}/json` });
+  assert.equal(third.isError, true);
+  assert.match(third.content, /already used its 2 web fetch\(es\)/);
+  webFetch.newMessage();
+  assert.equal((await fetch({ url: `${base}/json` })).isError, false);
+});
+
+test("denied and declined requests do not use up the fetch budget", async () => {
+  const policy = compileWebPolicy({ rules: [{ match: "127.0.0.1", action: "ask" }], maxFetchesPerMessage: 1 });
+  const declining = tool({ policy, confirm: async () => false });
+  await declining.fetch({ url: `${base}/json` });
+  await declining.fetch({ url: "https://not-listed.test/" });
+  const allowing = tool({ policy });
+  assert.equal((await allowing.fetch({ url: `${base}/json` })).isError, false);
+});
+
+test("the tool description reflects the policy", () => {
+  assert.match(tool().description, /The user must approve each fetch/);
+  const policy = compileWebPolicy({ rules: [{ match: "docs.example.com", action: "allow" }] });
+  assert.match(
+    tool({ policy }).description,
+    /Site access is limited by policy: allowed without asking: docs\.example\.com; any other site is refused\./,
+  );
 });

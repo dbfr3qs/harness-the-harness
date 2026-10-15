@@ -11,6 +11,8 @@ import { getTimeTool } from "./tools/get_time.ts";
 import { createListDirTool } from "./tools/list_dir.ts";
 import { createReadFileTool } from "./tools/read_file.ts";
 import { createWebFetchTool } from "./tools/web_fetch.ts";
+import { loadWebPolicy } from "./tools/web_policy.ts";
+import type { CompiledPolicy } from "./tools/web_policy.ts";
 import type { AgentHooks } from "./agent.ts";
 import type { Message } from "./types.ts";
 
@@ -74,6 +76,15 @@ async function main(): Promise<void> {
       process.exit(1);
     }
     throw err;
+  }
+
+  // A policy file that exists but is broken stops startup, rather than running without a policy.
+  let webPolicy: CompiledPolicy | undefined;
+  try {
+    webPolicy = await loadWebPolicy(config.webPolicyPath, config.webPolicyRequired);
+  } catch (err) {
+    console.error(`Config error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
   }
 
   const rl = createInterface({ input: process.stdin, output: process.stdout });
@@ -155,14 +166,18 @@ async function main(): Promise<void> {
     return allowed;
   };
 
+  const webFetch = createWebFetchTool({
+    confirm: confirmFetch,
+    pageChars: Math.max(500, config.maxToolOutputChars - 500),
+    policy: webPolicy,
+    onDecision: ({ url, stage, decision }) =>
+      transcript.log("tool_call", { web_policy: { url, stage, action: decision.action, rule: decision.rule?.match ?? "default" } }),
+  });
   const registry = createRegistry([
     getTimeTool,
     createListDirTool(config.workspaceRoot),
     createReadFileTool(config.workspaceRoot),
-    createWebFetchTool({
-      confirm: confirmFetch,
-      pageChars: Math.max(500, config.maxToolOutputChars - 500),
-    }),
+    webFetch,
   ]);
   const messages: Message[] = [];
 
@@ -180,6 +195,11 @@ async function main(): Promise<void> {
     `harness · ${config.model} · ${registry.definitions().length} tool(s) · ${config.stream ? "streaming" : "non-streaming"} · /exit /reset /history`,
   );
   console.log(`transcript: ${transcript.path}`);
+  console.log(
+    webPolicy
+      ? `web policy: ${config.webPolicyPath} (${webPolicy.policy.rules.length} rule(s), default ${webPolicy.policy.default})`
+      : "web policy: none (web_fetch asks before every fetch)",
+  );
   rl.setPrompt("> ");
   prompt();
 
@@ -202,6 +222,7 @@ async function main(): Promise<void> {
       continue;
     }
 
+    webFetch.newMessage();
     const undo = addUserText(messages, input);
     const lengthAfterInput = messages.length;
     try {

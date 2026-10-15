@@ -1,0 +1,15 @@
+{
+  "default": "deny",
+  "rules": [
+    { "match": "docs.anthropic.com", "action": "allow" },
+    { "match": "platform.claude.com", "action": "allow" },
+    { "match": "nodejs.org", "action": "allow" },
+    { "match": "developer.mozilla.org", "action": "allow" },
+    { "match": "en.wikipedia.org", "action": "allow" },
+    { "match": "https://github.com/anthropics/", "action": "allow" },
+    { "match": "github.com", "action": "ask" },
+    { "match": "*.ngrok.io", "action": "deny" },
+    { "match": "*.ngrok-free.app", "action": "deny" },
+    { "match": "pastebin.com", "action": "deny" }
+  ]
+}

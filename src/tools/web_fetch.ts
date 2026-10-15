@@ -7,6 +7,7 @@ import { BlockList, isIP } from "node:net";
 import type { LookupFunction } from "node:net";
 import { brotliDecompressSync, gunzipSync, inflateSync } from "node:zlib";
 import { defineTool } from "../registry.ts";
+import type { CompiledPolicy, Decision } from "./web_policy.ts";
 
 export const MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024;
 export const FETCH_TIMEOUT_MS = 20_000;
@@ -229,9 +230,15 @@ export interface WebFetchOptions {
   maxBytes?: number;
   /** Which resolved addresses may be connected to. Tests override this to reach a local server. */
   allowAddress?: (ip: string) => boolean;
+  /** Site policy. Without one, every fetch goes to `confirm`. */
+  policy?: CompiledPolicy;
+  /** Called with each policy decision, for the transcript. */
+  onDecision?: (info: { url: string; stage: "request" | "redirect"; decision: Decision }) => void;
 }
 
 export function createWebFetchTool(opts: WebFetchOptions) {
+  const policy = opts.policy;
+  let fetchesThisMessage = 0;
   const timeoutMs = opts.timeoutMs ?? FETCH_TIMEOUT_MS;
   const maxBytes = opts.maxBytes ?? MAX_DOWNLOAD_BYTES;
   const allow = opts.allowAddress ?? isPublicAddress;
@@ -248,13 +255,28 @@ export function createWebFetchTool(opts: WebFetchOptions) {
     }
   }
 
-  return defineTool({
+  function decide(url: URL, stage: "request" | "redirect"): Decision {
+    const decision = policy!.decide(url);
+    opts.onDecision?.({ url: url.href, stage, decision });
+    return decision;
+  }
+
+  const refusedBy = (d: Decision, url: URL) =>
+    d.rule
+      ? `${url.host} is blocked by the web policy (rule "${d.rule.match}")`
+      : `${url.host} is not on the web policy's list of allowed sites`;
+
+  const access = policy
+    ? `Site access is limited by policy: ${policy.summary()}. A refused or declined fetch must not be retried.`
+    : "The user must approve each fetch (a declined fetch must not be retried).";
+
+  const tool = defineTool({
     name: "web_fetch",
     description:
       "Fetch a web page or other text resource over http(s) and return its readable text. Use it when the user asks about the content at a URL " +
       "or you need current information from a specific page. HTML is converted to plain text with links shown as \"text (url)\"; " +
       "long pages are returned in parts, so call again with the offset given at the end to read more. " +
-      "The user must approve each fetch (a declined fetch must not be retried); private and local network addresses, binary content " +
+      `${access} Private and local network addresses, binary content ` +
       `and downloads over ${Math.round(maxBytes / 1024 / 1024)} MB are refused.`,
     input_schema: {
       type: "object",
@@ -275,9 +297,29 @@ export function createWebFetchTool(opts: WebFetchOptions) {
       }
       checkUrl(url, "the URL");
 
-      if (!(await opts.confirm(url))) {
+      let action: Decision["action"] = "ask";
+      if (policy) {
+        const max = policy.policy.maxUrlLength;
+        if (max !== undefined && url.href.length > max) {
+          throw new Error(`the URL is ${url.href.length} characters; the web policy allows at most ${max}. Use a shorter URL without long query strings.`);
+        }
+        const decision = decide(url, "request");
+        if (decision.action === "deny") {
+          throw new Error(`${refusedBy(decision, url)}. ${policy.summary()}. Do not retry; tell the user if you need a different site.`);
+        }
+        action = decision.action;
+
+        const budget = policy.policy.maxFetchesPerMessage;
+        if (budget !== undefined && fetchesThisMessage >= budget) {
+          throw new Error(`this message has already used its ${budget} web fetch(es) allowed by the web policy. Do not fetch more; answer with what you have, or tell the user.`);
+        }
+      }
+
+      if (action === "ask" && !(await opts.confirm(url))) {
         throw new Error(`the user declined to fetch ${url.href}. Do not retry this URL; ask the user how they would like to proceed.`);
       }
+      fetchesThisMessage++;
+      const approvedHost = url.host;
 
       const signal = AbortSignal.timeout(timeoutMs);
       let res: RawResponse | undefined;
@@ -299,6 +341,20 @@ export function createWebFetchTool(opts: WebFetchOptions) {
           throw new Error(`${url.href} redirected to an invalid URL: ${location}`);
         }
         checkUrl(url, "a redirect");
+        // Re-check the policy on every hop, or an open redirect on an allowed site would bypass it.
+        // A redirect may stay on the host that was just approved; anywhere else must be "allow".
+        if (policy) {
+          const decision = decide(url, "redirect");
+          const why =
+            decision.action === "deny"
+              ? refusedBy(decision, url)
+              : decision.action === "ask" && url.host !== approvedHost
+                ? `${url.host} needs the user's approval, which is not asked for in the middle of a redirect`
+                : undefined;
+          if (why) {
+            throw new Error(`${input.url} redirected to ${url.href}, but ${why}. Do not retry; tell the user where it redirected.`);
+          }
+        }
       }
 
       const contentType = String(res.headers["content-type"] ?? "text/plain");
@@ -338,6 +394,13 @@ export function createWebFetchTool(opts: WebFetchOptions) {
         ? `\n\n[more: ${text.length - end} chars remain; call web_fetch again with offset=${end}]`
         : "";
       return `${header}\n\n${text.slice(offset, end)}${more}`;
+    },
+  });
+
+  // The REPL calls newMessage() before each user message, resetting maxFetchesPerMessage.
+  return Object.assign(tool, {
+    newMessage() {
+      fetchesThisMessage = 0;
     },
   });
 }

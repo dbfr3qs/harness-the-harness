@@ -56,6 +56,7 @@ After each answer the REPL prints that exchange's input and output token totals 
 | `TIMEOUT_MS`            | `120000`                          | Idle timeout: the longest wait for the next piece of a response (the whole response when not streaming) |
 | `MAX_RETRIES`           | `3`                               | Retries on network errors, timeouts, 429, 500 and 529 (and overloaded errors mid-stream, until text has been shown) |
 | `STREAM`                | `true`                            | Stream responses (SSE); `0`/`false` for non-streaming requests |
+| `WEB_POLICY`            | `web-policy.json`                 | Site policy for `web_fetch` (see below). If set explicitly, the file must exist |
 | `MAX_TOOL_OUTPUT_CHARS` | `8000`                            | Tool results longer than this are truncated with a visible marker |
 | `WORKSPACE_ROOT`        | current directory                 | Sandbox root for the file tools |
 | `TRANSCRIPT_PATH`       | `./transcripts/<timestamp>.jsonl` | JSONL transcript file |
@@ -75,9 +76,60 @@ All tools are read-only. `web_fetch` is the only one that reaches the network. F
 
 A fetched URL can carry data out of the workspace (for example, file contents placed in a query string after the model reads a page containing injected instructions), so `web_fetch` has these protections:
 
-- **You approve every fetch.** The REPL shows the full URL and asks `[y]es / [n]o / [a]lways for <host>`. `a` approves that host until you exit. A declined fetch returns an error telling the model not to retry. If input is closed (piped stdin), fetches are declined.
+- **A site policy, if you add one** (next section), decides first: `allow` fetches without asking, `deny` refuses, `ask` uses the prompt below.
+- **Otherwise you approve every fetch.** The REPL shows the full URL and asks `[y]es / [n]o / [a]lways for <host>`. `a` approves that host until you exit. A declined fetch returns an error telling the model not to retry. If input is closed (piped stdin), fetches are declined.
 - **Public addresses only.** Loopback, private, link-local (including cloud metadata at `169.254.169.254`), CGNAT, multicast and reserved ranges are refused, including IPv4 written inside IPv6. The check runs inside the DNS lookup, so the address that was checked is the address connected to. Every redirect hop is checked again (up to 5 hops); you're only asked about the URL the model chose.
 - **Limits.** `http`/`https` only, no credentials in URLs, a 20-second timeout, a 2 MB download cap (stated in the result when hit), and text content types only (HTML, plain text, JSON, XML).
+
+### Web policy (site allowlist)
+
+With no policy file, `web_fetch` asks before every fetch. To control which sites it can reach, copy the example and edit it:
+
+```sh
+cp web-policy.example.json web-policy.json
+```
+
+```json
+{
+  "default": "deny",
+  "rules": [
+    { "match": "docs.anthropic.com",             "action": "allow" },
+    { "match": "*.wikipedia.org",                "action": "allow" },
+    { "match": "https://github.com/anthropics/", "action": "allow" },
+    { "match": "github.com",                     "action": "ask" },
+    { "match": "*.ngrok.io",                     "action": "deny" }
+  ]
+}
+```
+
+**Actions:** `allow` fetches without asking, `ask` shows the approval prompt, and `deny` refuses without asking. A denied fetch tells the model which sites are allowed and not to retry.
+
+**Matching:**
+
+| Pattern | Matches |
+| ------- | ------- |
+| `docs.anthropic.com` | That host exactly, on any port. Not its subdomains. |
+| `*.wikipedia.org` | Any subdomain (`en.wikipedia.org`, `a.b.wikipedia.org`), but not `wikipedia.org` itself; list that separately if you want it. |
+| `https://github.com/anthropics/` | That scheme, host and port, and paths under that prefix on `/` boundaries (`/v1` matches `/v1/models` but not `/v10`). |
+
+Hosts are compared after normalising case, punycode and a trailing dot.
+
+**Precedence:** when several rules match, `deny` beats `allow`, which beats `ask`. `default` (which is `deny` if omitted) applies only when no rule matches. Answering `a` at the prompt approves an `ask` host for the session, but it can never override `deny`.
+
+**Redirects** are checked against the policy on every hop, so an open redirect on an allowed site can't lead somewhere else. A redirect may go to an `allow` site, or stay on the host that was just approved. Anything else is refused, since there's no prompt in the middle of a redirect.
+
+**The model sees the policy:** the `web_fetch` description lists the allowed, ask and blocked sites, so the model doesn't waste turns on URLs that will be refused.
+
+**Optional limits** (not set in the example, so they don't apply until you add them):
+
+| Setting | Effect |
+| ------- | ------ |
+| `"maxUrlLength": 300` | Refuses URLs longer than this. It's hard to fit file contents into a short URL. |
+| `"maxFetchesPerMessage": 5` | Caps the fetches a single user message can trigger, including follow-up pages read with `offset`. Denied and declined fetches don't count. |
+
+An allowlist limits *where* requests go, not what they carry. An allowed site that records what's in its URLs (search pages, for example) could still receive data in a query string, which is what `maxUrlLength` narrows.
+
+**Safety of the file:** a policy file that exists but is invalid (bad JSON, unknown settings or actions, malformed patterns) stops the REPL at startup with an error, rather than running without a policy. Each decision is logged in the transcript with the rule that matched. The REPL banner shows which policy is in effect.
 
 ## Adding a new tool
 
@@ -138,7 +190,7 @@ src/
   log.ts          JSONL transcript writer
   repl.ts         CLI entry point
   spinner.ts      waiting animation
-  tools/          workspace sandboxing, get_time, list_dir, read_file, web_fetch
+  tools/          workspace sandboxing, get_time, list_dir, read_file, web_fetch, web_policy
 test/             unit tests (fake model, fake fetch, temp dirs)
 ```
 

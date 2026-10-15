@@ -12,6 +12,8 @@ export interface Config {
   maxToolOutputChars: number;
   workspaceRoot: string;
   transcriptPath: string;
+  webPolicyPath: string;
+  webPolicyRequired: boolean; // WEB_POLICY was set explicitly, so a missing file is an error
 }
 
 export class ConfigError extends Error {}
@@ -58,5 +60,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     maxToolOutputChars: positiveInt(env, "MAX_TOOL_OUTPUT_CHARS", 8000),
     workspaceRoot: env.WORKSPACE_ROOT || process.cwd(),
     transcriptPath: env.TRANSCRIPT_PATH || join("transcripts", `${timestamp()}.jsonl`),
+    webPolicyPath: env.WEB_POLICY || "web-policy.json",
+    webPolicyRequired: Boolean(env.WEB_POLICY),
   };
 }
