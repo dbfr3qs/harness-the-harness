@@ -1,6 +1,6 @@
 import { after, before, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRegistry } from "../src/registry.ts";
@@ -21,6 +21,10 @@ before(async () => {
   await writeFile(join(root, "big.txt"), "x".repeat(MAX_FILE_BYTES + 1));
   await writeFile(join(root, "exact.txt"), "y".repeat(MAX_FILE_BYTES));
   await writeFile(join(root, "binary.bin"), Buffer.from([0xff, 0xfe, 0x00, 0x80]));
+  await writeFile(join(root, ".env"), "ANTHROPIC_API_KEY=sk-ant-SECRET\n");
+  await writeFile(join(root, ".env.local"), "TOKEN=SECRET\n");
+  await writeFile(join(root, "src", ".env"), "TOKEN=SECRET\n");
+  await symlink(join(root, ".env"), join(root, "innocent.txt"));
   for (let i = 0; i < MAX_ENTRIES + 5; i++) {
     await writeFile(join(root, "many", `f${String(i).padStart(3, "0")}.txt`), "");
   }
@@ -43,7 +47,7 @@ test("list_dir defaults to '.', sorts, and marks directories", async () => {
   const out = await registry.dispatch("list_dir", {});
   assert.equal(out.isError, false);
   assert.deepEqual(out.content.split("\n"), [
-    "big.txt", "binary.bin", "empty/", "exact.txt", "hello.txt", "many/", "src/",
+    ".env", ".env.local", "big.txt", "binary.bin", "empty/", "exact.txt", "hello.txt", "innocent.txt", "many/", "src/",
   ]);
 });
 
@@ -90,5 +94,27 @@ test("read_file refuses non-UTF-8, directories, missing files and traversal", as
     assert.equal(out.isError, true, path);
     assert.match(out.content, /^Error: /);
     assert.match(out.content, pattern, path);
+  }
+});
+
+test("read_file never reads .env files, however the path is spelled", async () => {
+  const paths = [
+    ".env", "./.env", "src/../.env", ".ENV", ".env.local", "src/.env",
+    join(root, ".env"), // absolute path inside the workspace
+    "innocent.txt", // symlink to .env
+  ];
+  for (const path of paths) {
+    const out = await registry.dispatch("read_file", { path });
+    assert.equal(out.isError, true, path);
+    assert.match(out.content, /^Error: .* is an environment file \(\.env\)/, path);
+    assert.ok(!out.content.includes("SECRET"), `secret leaked for ${path}`);
+  }
+});
+
+test("names that merely contain 'env' are still readable", async () => {
+  await writeFile(join(root, "env.txt"), "fine");
+  await writeFile(join(root, "my.env.txt"), "fine");
+  for (const path of ["env.txt", "my.env.txt"]) {
+    assert.deepEqual(await registry.dispatch("read_file", { path }), { content: "fine", isError: false });
   }
 });

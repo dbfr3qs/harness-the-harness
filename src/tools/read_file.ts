@@ -1,15 +1,22 @@
 import { readFile, stat } from "node:fs/promises";
+import { basename, resolve } from "node:path";
 import { defineTool } from "../registry.ts";
 import { resolveInWorkspace } from "./workspace.ts";
 
 export const MAX_FILE_BYTES = 256 * 1024;
+
+// .env, .env.local, .env.production, ...: these hold secrets such as ANTHROPIC_API_KEY.
+function isEnvFile(path: string): boolean {
+  const name = basename(path).toLowerCase();
+  return name === ".env" || name.startsWith(".env.");
+}
 
 export function createReadFileTool(root: string) {
   return defineTool({
     name: "read_file",
     description:
       "Read a UTF-8 text file inside the workspace and return its full contents. Use list_dir first if you are unsure of the path. " +
-      "Refuses files over 256 KB, binary or non-UTF-8 files, directories, and paths outside the workspace. " +
+      "Refuses files over 256 KB, binary or non-UTF-8 files, directories, .env files (they hold secrets), and paths outside the workspace. " +
       "Very long contents may be truncated, with a note saying how much was cut.",
     input_schema: {
       type: "object",
@@ -20,7 +27,11 @@ export function createReadFileTool(root: string) {
     },
     handler: async (input) => {
       const p = input.path as string;
+      const envRefusal = `"${p}" is an environment file (.env) that may hold secrets, so read_file will never read it. Do not try other paths to it; ask the user for any value you need.`;
+      // Check the path as given and the real path, so a symlink to .env is refused too.
+      if (isEnvFile(resolve(root, p))) throw new Error(envRefusal);
       const file = await resolveInWorkspace(root, p);
+      if (isEnvFile(file)) throw new Error(envRefusal);
       const info = await stat(file);
       if (info.isDirectory()) throw new Error(`"${p}" is a directory. Use list_dir to see its contents.`);
       if (info.size > MAX_FILE_BYTES) {

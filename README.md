@@ -65,7 +65,7 @@ After each answer the REPL prints that exchange's input and output token totals 
 | `list_dir` | `path` (default `.`)      | One entry per line, directories end in `/`; capped at 200 entries |
 | `read_file`| `path` (required)         | UTF-8 file contents; refuses files over 256 KB |
 
-All tools are read-only. File tools only see paths inside `WORKSPACE_ROOT`: `..` traversal, absolute paths elsewhere, and symlinks that escape are refused.
+All tools are read-only. File tools only see paths inside `WORKSPACE_ROOT`: `..` traversal, absolute paths elsewhere, and symlinks that escape are refused. `read_file` never reads `.env` or `.env.*` files, in any directory, whatever the case, or through a symlink, because they hold secrets such as the API key. `list_dir` still shows that they exist.
 
 ## Adding a new tool
 
