@@ -24,6 +24,7 @@ test("/provider and /model complete their arguments", () => {
   assert.deepEqual(complete("/model deepseek-flash "), [[], ""], "nothing after the model");
   assert.deepEqual(complete("/thinking o"), [["on ", "off "], "o"]);
   assert.deepEqual(complete("/thinking of"), [["off "], "of"]);
+  assert.deepEqual(complete("/turns u"), [["unlimited "], "u"]);
 });
 
 test("/policy completes subcommands, actions, limits and existing rule patterns", () => {

@@ -35,6 +35,7 @@ function candidates(before: string[], state: CompletionState): string[] {
       if (command === "/model") return state.models;
       if (command === "/policy") return POLICY_SUBCOMMANDS;
       if (command === "/thinking") return ["on", "off"];
+      if (command === "/turns") return ["unlimited"];
       return [];
     case 2:
       if (command !== "/policy") return [];

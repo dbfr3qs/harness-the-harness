@@ -37,13 +37,13 @@ In the REPL:
 
 | Command    | Effect |
 | ---------- | ------ |
-| `/exit`    | Quit (Ctrl+C and Ctrl+D also exit cleanly) |
+| `/exit`    | Quit (Ctrl+D, or Ctrl+C on an empty line, also quits; see [Stopping a run](#stopping-a-run)) |
 | `/reset`   | Clear conversation history |
 | `/history` | Show message count, roles and block types |
 | `/policy`  | View or change the `web_fetch` site policy (see [Changing the policy from the REPL](#changing-the-policy-from-the-repl)) |
 | `/provider` | Switch between Claude and DeepSeek from a menu; `/provider deepseek` switches directly (see [Providers](#providers)) |
 | `/model`   | Switch model within the current provider from a menu; `/model <id>` switches directly |
-| `/turns`   | Show the model-call limit per message; `/turns <n>` changes it for the session |
+| `/turns`   | Show the model-call limit per message; `/turns <n>` or `/turns unlimited` changes it for the session |
 | `/thinking` | Show or hide the model's thinking: `/thinking on`, `/thinking off` (see [Seeing the model's thinking](#seeing-the-models-thinking)) |
 
 Press Tab to complete commands and their arguments (provider names, the current provider's models, `/policy` subcommands and existing rule patterns); press it twice to list the options. A line that starts with an unknown `/word` is reported as an unknown command rather than sent to the model; paths such as `/etc/hosts` still go through.
@@ -53,6 +53,19 @@ Responses stream by default: text appears as the model writes it, and an animate
 Each tool call is shown as a dim line as it runs (`→ read_file src/agent.ts`), with a `✗` line under it if the tool returned an error, so a long run of tool calls is never a silent wait. The model's thinking is hidden unless you turn it on with `/thinking on`.
 
 After each answer the REPL prints that exchange's token totals, the number of model calls and the number of tool calls, e.g. `[tokens: 9413 in + 42240 cached, 5951 out · 8 model call(s) · 19 tool call(s)]`. "Cached" is input the provider served from its prompt cache (DeepSeek caches automatically); it is still input the model read, just billed at a lower rate. If the loop stops early, it says why: `MAX_TURNS` reached while the model was still calling tools, `MAX_TOKENS` cut-off, or a refusal. After `MAX_TURNS`, send another message and the model continues where it left off; `/turns <n>` raises the limit first if it needs more room.
+
+### Stopping a run
+
+Press **Ctrl+C** while the model is working to stop it and get the prompt back. The request in flight is cancelled, a `web_fetch` in progress or waiting for approval is abandoned, and the conversation keeps every completed step: tool calls that had not run yet are recorded as interrupted, so you can send "continue" just as after `MAX_TURNS`. A partly written reply is discarded, and if nothing had come back yet, your message is taken back too.
+
+| Where | Ctrl+C does |
+| ----- | ----------- |
+| While the model is working | Stops the run. A second press, if it hasn't stopped yet, quits |
+| At the prompt, with text typed | Clears the line |
+| At an empty prompt | Quits (skipping the `/exit` warning about unsaved `/policy` changes) |
+| At an empty prompt, within 1.5 s of a run finishing by itself | Asks you to press again, so a press meant to stop a run that had just finished doesn't quit |
+
+With `/turns unlimited` (or `MAX_TURNS=unlimited`) there is no limit on model calls per message, so Ctrl+C is the way to stop a run that is going nowhere.
 
 ## Providers
 
@@ -107,7 +120,7 @@ Models may skip thinking on simple requests, so not every answer has any.
 | `BASE_URL`              | per provider                      | `https://api.anthropic.com` or `https://api.deepseek.com/anthropic` |
 | `ANTHROPIC_MODEL`, `ANTHROPIC_BASE_URL` | none              | Older names for `MODEL` and `BASE_URL`; used only with `PROVIDER=anthropic`, and `MODEL`/`BASE_URL` win |
 | `MAX_TOKENS`            | `4096`                            | `max_tokens` per request |
-| `MAX_TURNS`             | `10`                              | Model calls per user message; `/turns <n>` changes it for the session |
+| `MAX_TURNS`             | `10`                              | Model calls per user message, or `unlimited`; `/turns` changes it for the session |
 | `TIMEOUT_MS`            | `120000`                          | Idle timeout: the longest wait for the next piece of a response (the whole response when not streaming) |
 | `MAX_RETRIES`           | `3`                               | Retries on network errors, timeouts, 429, 500 and 529 (and overloaded errors mid-stream, until text has been shown) |
 | `STREAM`                | `true`                            | Stream responses (SSE); `0`/`false` for non-streaming requests |

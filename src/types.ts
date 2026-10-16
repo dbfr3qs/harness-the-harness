@@ -61,6 +61,7 @@ export interface ModelRequest {
   system: string;
   messages: Message[];
   tools: ToolDefinition[];
+  signal?: AbortSignal; // aborted when the user interrupts; never sent to the API
 }
 
 export type ModelFn = (req: ModelRequest) => Promise<MessageResponse>;

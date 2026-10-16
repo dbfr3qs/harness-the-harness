@@ -223,7 +223,7 @@ const TEXT_TYPES = /^(text\/|application\/(json|xml|xhtml\+xml|javascript|ld\+js
 
 export interface WebFetchOptions {
   /** Asks the user to approve fetching `url`. Resolves false to decline. */
-  confirm: (url: URL) => Promise<boolean>;
+  confirm: (url: URL, signal: AbortSignal) => Promise<boolean>;
   /** Characters of page text returned per call; longer pages are paged with `offset`. */
   pageChars: number;
   timeoutMs?: number;
@@ -302,7 +302,7 @@ export function createWebFetchTool(opts: WebFetchOptions) {
       },
       required: ["url"],
     },
-    handler: async (input) => {
+    handler: async (input, { signal: interrupt }) => {
       const offset = (input.offset as number | undefined) ?? 0;
       if (offset < 0) throw new Error(`offset must be 0 or more (got ${offset}).`);
       let url: URL;
@@ -332,13 +332,14 @@ export function createWebFetchTool(opts: WebFetchOptions) {
         }
       }
 
-      if (action === "ask" && !(await opts.confirm(url))) {
+      if (action === "ask" && !(await opts.confirm(url, interrupt))) {
+        if (interrupt.aborted) throw new Error(`fetching ${url.href} was interrupted by the user.`);
         throw new Error(`the user declined to fetch ${url.href}. Do not retry this URL; ask the user how they would like to proceed.`);
       }
       fetchesThisMessage++;
       const approvedHost = url.host;
 
-      const signal = AbortSignal.timeout(timeoutMs);
+      const signal = AbortSignal.any([AbortSignal.timeout(timeoutMs), interrupt]);
       let res: RawResponse | undefined;
       for (let hops = 0; ; hops++) {
         try {
@@ -346,6 +347,7 @@ export function createWebFetchTool(opts: WebFetchOptions) {
         } catch (err) {
           const e = err as NodeJS.ErrnoException;
           if (e.code === "EBLOCKEDADDRESS") throw new Error(`${e.message}. Only public internet addresses can be fetched.`);
+          if (interrupt.aborted) throw new Error(`fetching ${url.href} was interrupted by the user.`);
           if (e.name === "TimeoutError" || e.name === "AbortError") throw new Error(`fetching ${url.href} timed out after ${timeoutMs / 1000} s.`);
           throw new Error(`could not fetch ${url.href}: ${e.code ? `${e.code} ` : ""}${e.message}`);
         }

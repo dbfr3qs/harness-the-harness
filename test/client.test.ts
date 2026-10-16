@@ -120,6 +120,28 @@ test("with showThinking, Claude 5 models are asked for summarized thinking; noth
   assert.equal((await body({ provider: "deepseek", model: "deepseek-flash", showThinking: true })).thinking, undefined);
 });
 
+test("an interrupt is never retried, and cuts a retry wait short", async () => {
+  // The fetch fails because the signal aborted, which looks like a network error.
+  const ctrl = new AbortController();
+  const abortingFetch = (async (_url: string, init: RequestInit) => {
+    ctrl.abort();
+    throw init.signal!.reason ?? new Error("aborted");
+  }) as unknown as typeof fetch;
+  const model = createAnthropicClient(config, {}, { fetch: abortingFetch, sleep: async () => {} });
+  await assert.rejects(model({ ...req, signal: ctrl.signal }), (err: Error) => err.name === "InterruptedError");
+
+  // A 529 schedules a 30 s retry-after; interrupting during the wait ends it at once.
+  const ctrl2 = new AbortController();
+  const retryLater = (async () => json(529, { error: { type: "overloaded_error", message: "busy" } }, { "retry-after": "30" })) as unknown as typeof fetch;
+  const waiting = createAnthropicClient(config, { onRetry: () => setTimeout(() => ctrl2.abort(), 10) }, {
+    fetch: retryLater,
+    sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  });
+  const started = Date.now();
+  await assert.rejects(waiting({ ...req, signal: ctrl2.signal }), (err: Error) => err.name === "InterruptedError");
+  assert.ok(Date.now() - started < 2000);
+});
+
 test("400 throws immediately with error.type and error.message, no retry", async () => {
   const { model, calls } = client([
     json(400, { type: "error", error: { type: "invalid_request_error", message: "messages: bad shape" } }),

@@ -25,6 +25,14 @@ const RETRYABLE_STATUS = new Set([429, 500, 529]);
 const RETRYABLE_STREAM_ERRORS = new Set(["overloaded_error", "api_error", "rate_limit_error"]);
 const BASE_DELAY_MS = 500;
 
+/** Thrown when the request's signal is aborted (the user interrupted). Never retried. */
+export class InterruptedError extends Error {
+  constructor() {
+    super("interrupted by the user");
+    this.name = "InterruptedError";
+  }
+}
+
 type Attempt =
   | { kind: "ok"; response: MessageResponse }
   | { kind: "retry"; reason: string; retryAfterMs?: number };
@@ -45,7 +53,7 @@ export function createAnthropicClient(
 
   // `shown` tracks whether any text reached onTextDelta during this call. Once it has,
   // a retry would print the answer twice, so failures after that point are fatal.
-  async function attempt(payload: string, shown: { value: boolean }): Promise<Attempt> {
+  async function attempt(payload: string, shown: { value: boolean }, interrupt?: AbortSignal): Promise<Attempt> {
     // Idle timeout: aborts when nothing arrives for timeoutMs. For a non-streaming request
     // this is the whole request; for a stream it is the longest allowed gap between chunks.
     const controller = new AbortController();
@@ -70,7 +78,7 @@ export function createAnthropicClient(
             "content-type": "application/json",
           },
           body: payload,
-          signal: controller.signal,
+          signal: interrupt ? AbortSignal.any([controller.signal, interrupt]) : controller.signal,
         });
       } catch (err) {
         return { kind: "retry", reason: describeNetworkError(err, config.timeoutMs) };
@@ -101,13 +109,18 @@ export function createAnthropicClient(
         return { kind: "ok", response: parseResponse(text, label) };
       }
 
-      return await readStream(res, touch, shown);
+      return await readStream(res, touch, shown, interrupt);
     } finally {
       clearTimeout(timer);
     }
   }
 
-  async function readStream(res: Response, touch: () => void, shown: { value: boolean }): Promise<Attempt> {
+  async function readStream(
+    res: Response,
+    touch: () => void,
+    shown: { value: boolean },
+    interrupt?: AbortSignal,
+  ): Promise<Attempt> {
     if (!res.body) return { kind: "retry", reason: "stream response had no body" };
     const acc = createMessageAccumulator();
     const failed = (reason: string): Attempt => {
@@ -133,6 +146,7 @@ export function createAnthropicClient(
         }
       }
     } catch (err) {
+      if (interrupt?.aborted) throw new InterruptedError();
       if (err instanceof StreamErrorEvent) {
         if (RETRYABLE_STREAM_ERRORS.has(err.errorType)) return failed(`stream error ${err.message}`);
         throw new Error(`${label} API error in stream: ${err.message}`);
@@ -166,13 +180,18 @@ export function createAnthropicClient(
     const payload = JSON.stringify(body);
     const shown = { value: false };
 
+    const interrupt = req.signal;
     for (let n = 0; ; n++) {
+      if (interrupt?.aborted) throw new InterruptedError();
       let result: Attempt;
       try {
-        result = await attempt(payload, shown);
+        result = await attempt(payload, shown, interrupt);
       } catch (err) {
+        if (interrupt?.aborted) throw new InterruptedError();
         throw new Error(redact(err instanceof Error ? err.message : String(err)));
       }
+      // An aborted fetch looks like a network error; don't retry it.
+      if (interrupt?.aborted) throw new InterruptedError();
       if (result.kind === "ok") return result.response;
 
       if (n >= config.maxRetries) {
@@ -180,7 +199,8 @@ export function createAnthropicClient(
       }
       const delayMs = result.retryAfterMs ?? backoff(n);
       hooks.onRetry?.({ attempt: n + 1, delayMs, reason: redact(result.reason) });
-      await sleep(delayMs);
+      // A retry-after can be long, so an interrupt ends the wait too.
+      await Promise.race([sleep(delayMs), aborted(interrupt)]);
     }
   };
 }
@@ -192,6 +212,15 @@ export function createAnthropicClient(
  */
 export function returnsThinkingOnRequest(provider: Config["provider"], model: string): boolean {
   return provider === "anthropic" && /^claude-[a-z]+-5(?:-|$)/.test(model);
+}
+
+// Resolves when `signal` aborts; never resolves without one.
+function aborted(signal: AbortSignal | undefined): Promise<void> {
+  return new Promise((resolve) => {
+    if (!signal) return;
+    if (signal.aborted) return resolve();
+    signal.addEventListener("abort", () => resolve(), { once: true });
+  });
 }
 
 function backoff(n: number): number {

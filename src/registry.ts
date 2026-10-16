@@ -4,7 +4,11 @@ export interface Tool {
   name: string;
   description: string;
   input_schema: JsonSchema;
-  handler: (input: Record<string, unknown>) => Promise<string>;
+  handler: (input: Record<string, unknown>, ctx: ToolContext) => Promise<string>;
+}
+
+export interface ToolContext {
+  signal: AbortSignal; // aborted when the user interrupts the run; long-running tools should stop
 }
 
 export interface ToolOutcome {
@@ -33,7 +37,7 @@ export function createRegistry(tools: Tool[]) {
   }
 
   // Never throws: every failure becomes an instructive error result for the model.
-  async function dispatch(name: string, input: unknown): Promise<ToolOutcome> {
+  async function dispatch(name: string, input: unknown, signal: AbortSignal = new AbortController().signal): Promise<ToolOutcome> {
     const tool = byName.get(name);
     if (!tool) {
       const valid = [...byName.keys()].join(", ") || "(none)";
@@ -45,7 +49,7 @@ export function createRegistry(tools: Tool[]) {
     try {
       const problem = validateInput(tool, input);
       if (problem) return fail(problem);
-      const content = await tool.handler(input as Record<string, unknown>);
+      const content = await tool.handler(input as Record<string, unknown>, { signal });
       return { content: String(content), isError: false };
     } catch (err) {
       return fail(describeError(err).replace(/^Error:\s*/, ""));

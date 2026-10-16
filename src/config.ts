@@ -48,7 +48,7 @@ export interface Config {
   baseUrl: string;
   model: string;
   maxTokens: number;
-  maxTurns: number;
+  maxTurns: number; // Infinity when unlimited
   timeoutMs: number;
   maxRetries: number;
   stream: boolean;
@@ -70,6 +70,17 @@ function positiveInt(env: NodeJS.ProcessEnv, name: string, fallback: number, min
     throw new ConfigError(`${name} must be an integer >= ${min} (got "${raw}")`);
   }
   return n;
+}
+
+// A whole number of 1 or more, or "unlimited" ("off" also works) for no limit.
+function maxTurns(env: NodeJS.ProcessEnv): number {
+  const raw = env.MAX_TURNS?.trim().toLowerCase();
+  if (raw === "unlimited" || raw === "off") return Infinity;
+  try {
+    return positiveInt(env, "MAX_TURNS", 10);
+  } catch {
+    throw new ConfigError(`MAX_TURNS must be an integer >= 1 or "unlimited" (got "${env.MAX_TURNS}")`);
+  }
 }
 
 function bool(env: NodeJS.ProcessEnv, name: string, fallback: boolean): boolean {
@@ -151,7 +162,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...settings,
     secrets,
     maxTokens: positiveInt(env, "MAX_TOKENS", 4096),
-    maxTurns: positiveInt(env, "MAX_TURNS", 10),
+    maxTurns: maxTurns(env),
     timeoutMs: positiveInt(env, "TIMEOUT_MS", 120_000),
     maxRetries: positiveInt(env, "MAX_RETRIES", 3, 0),
     stream: bool(env, "STREAM", true),

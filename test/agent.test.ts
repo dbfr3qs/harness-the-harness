@@ -243,3 +243,63 @@ test("model errors propagate to the caller", async () => {
   };
   await assert.rejects(run(model, [user("go")]), /API down/);
 });
+
+// --- interrupting -------------------------------------------------------------
+
+test("an interrupt during a model call stops the run and adds nothing", async () => {
+  const ctrl = new AbortController();
+  const model: ModelFn = (req) =>
+    new Promise((_resolve, reject) => req.signal!.addEventListener("abort", () => reject(new Error("aborted"))));
+  const messages = [user("go")];
+  const pending = run(model, messages, { signal: ctrl.signal });
+  ctrl.abort();
+  const out = await pending;
+  assert.equal(out.stopReason, "interrupted");
+  assert.equal(out.turns, 0);
+  assert.deepEqual(messages, [user("go")]);
+});
+
+test("an interrupt during tool calls gives the rest an 'interrupted' result, so history stays valid", async () => {
+  const ctrl = new AbortController();
+  const ran: string[] = [];
+  const tools = createRegistry([
+    defineTool({
+      name: "step",
+      description: "A step.",
+      input_schema: { type: "object", properties: { n: { type: "string" } } },
+      handler: async (input) => {
+        ran.push(String(input.n));
+        if (input.n === "2") ctrl.abort(); // the user presses Ctrl+C while step 2 runs
+        return `did ${input.n}`;
+      },
+    }),
+  ]);
+  const calls = [toolUse("step", { n: "1" }), toolUse("step", { n: "2" }), toolUse("step", { n: "3" })];
+  const { model, requests } = fakeModel([reply(calls), reply([text("never reached")])]);
+  const messages = [user("go")];
+  const out = await runAgent({ model, registry: tools, system: "s", messages, maxTurns: 5, maxToolOutputChars: 100, signal: ctrl.signal });
+
+  assert.equal(out.stopReason, "interrupted");
+  assert.equal(requests.length, 1, "no further model call");
+  assert.deepEqual(ran, ["1", "2"], "step 3 never ran");
+  assert.equal(out.toolCalls, 2);
+  const results = resultsOf(messages.at(-1));
+  assert.deepEqual(results.map((r) => r.tool_use_id), calls.map((c) => c.id), "every call has a result");
+  assert.equal(results[1]!.content, "did 2");
+  assert.match(results[2]!.content, /^Error: this tool call was not run because the user interrupted/);
+  assert.equal(results[2]!.is_error, true);
+});
+
+test("an already-aborted signal makes no model call; unlimited turns run until the model is done", async () => {
+  const ctrl = new AbortController();
+  ctrl.abort();
+  const { model, requests } = fakeModel([reply([text("x")])]);
+  assert.equal((await run(model, [user("go")], { signal: ctrl.signal })).stopReason, "interrupted");
+  assert.equal(requests.length, 0);
+
+  const script = [...Array.from({ length: 30 }, (_, i) => reply([toolUse("echo", { text: String(i) })])), reply([text("done")])];
+  const many = fakeModel(script);
+  const out = await run(many.model, [user("go")], { maxTurns: Infinity });
+  assert.equal(out.stopReason, "done");
+  assert.equal(out.turns, 31);
+});

@@ -15,7 +15,7 @@ import { createTranscriptLogger } from "./log.ts";
 import { createPolicyStore, runPolicyCommand } from "./policy_command.ts";
 import { createRegistry } from "./registry.ts";
 import { createSpinner } from "./spinner.ts";
-import { runTurnsCommand } from "./turns_command.ts";
+import { describeTurns, runTurnsCommand } from "./turns_command.ts";
 import { getTimeTool } from "./tools/get_time.ts";
 import { createListDirTool } from "./tools/list_dir.ts";
 import type { PrivatePath } from "./tools/private_paths.ts";
@@ -30,6 +30,7 @@ const SYSTEM_PROMPT =
   "You are a helpful assistant running in a command-line harness. Answer concisely and accurately.";
 
 const verbose = process.argv.includes("--verbose");
+const QUIT_GRACE_MS = 1500;
 const dim = (s: string) => (process.stdout.isTTY ? `\x1b[2m${s}\x1b[0m` : s);
 
 // "read_file .git/config", "web_fetch https://x.test offset=8000": the call at a glance.
@@ -79,12 +80,16 @@ function stopNotice(result: AgentResult, config: Config): string | undefined {
     case "max_turns":
       // The loop only stops here when the last response still had tool calls, so any text so far
       // was commentary along the way, not an answer.
-      return `[stopped: reached MAX_TURNS (${config.maxTurns}) model calls while the model was still calling tools, before it gave an answer. ` +
+      return `[stopped: reached MAX_TURNS (${describeTurns(config.maxTurns)}) while the model was still calling tools, before it gave an answer. ` +
         "Send another message to let it continue, ask it to summarise what it found, or raise the limit with /turns <n>]";
     case "max_tokens":
       return `[stopped: the response hit MAX_TOKENS (${config.maxTokens}) and was cut off]`;
     case "refusal":
       return "[stopped: the model declined to respond]";
+    case "interrupted":
+      return result.turns === 0 && result.toolCalls === 0
+        ? "[interrupted: nothing was added to the conversation]"
+        : "[interrupted: completed steps are kept in the conversation (a partly written reply is not); send a message to continue]";
     case "done":
       return undefined;
   }
@@ -243,16 +248,18 @@ async function main(): Promise<void> {
   // web_fetch asks before every fetch, because a fetched URL can carry workspace data out.
   // "a" approves the host for the rest of the session.
   const approvedHosts = new Map<string, string>(); // host -> origin, so /policy save can keep them as rules
-  const confirmFetch = async (url: URL): Promise<boolean> => {
+  const confirmFetch = async (url: URL, signal: AbortSignal): Promise<boolean> => {
     if (approvedHosts.has(url.host)) return true;
     spinner.stop();
     endLine();
     const shown = url.href.length > 500 ? `${url.href.slice(0, 500)}… (${url.href.length - 500} more chars)` : url.href;
     let answer: string;
     try {
-      answer = (await rl.question(`  Allow web_fetch of ${shown}?\n  [y]es / [n]o / [a]lways for ${url.host}: `)).trim().toLowerCase();
+      answer = (await rl.question(`  Allow web_fetch of ${shown}?\n  [y]es / [n]o / [a]lways for ${url.host}: `, { signal }))
+        .trim()
+        .toLowerCase();
     } catch {
-      return false; // input closed: treat as declined
+      return false; // input closed, or the run was interrupted: treat as declined
     }
     const allowed = answer === "y" || answer === "yes" || answer === "a" || answer === "always";
     if ((answer === "a" || answer === "always") && !approvedHosts.has(url.host)) approvedHosts.set(url.host, url.origin);
@@ -285,11 +292,39 @@ async function main(): Promise<void> {
   const prompt = () => {
     if (!closed) rl.prompt();
   };
-  rl.on("SIGINT", () => {
+  const quit = () => {
     spinner.stop();
-    console.log("\nBye.");
+    endThinking();
+    endLine();
+    console.log("Bye.");
     rl.close();
     void transcript.flush().finally(() => process.exit(0));
+  };
+  // Ctrl+C: during a run, the first press stops the run and a second quits (in case it doesn't
+  // stop promptly); at the prompt, it clears typed text, and on an empty line it quits.
+  rl.on("SIGINT", () => {
+    if (running) {
+      if (running.signal.aborted) return quit();
+      running.abort();
+      spinner.stop();
+      say(dim("  [interrupting… press Ctrl+C again to quit]"));
+      return;
+    }
+    if (rl.line !== "") {
+      rl.write(null, { ctrl: true, name: "e" }); // to the end of the line,
+      rl.write(null, { ctrl: true, name: "u" }); // then delete back to the start
+      return;
+    }
+    // A press meant to interrupt can land just after the run finished on its own; don't let
+    // that quit. After an interrupt, the next press quits as expected.
+    if (!quitArmed && Date.now() - runFinishedAt < QUIT_GRACE_MS) {
+      quitArmed = true;
+      process.stdout.write(`\n${dim("(the run had already finished; press Ctrl+C again to quit)")}\n`);
+      prompt();
+      return;
+    }
+    process.stdout.write("\n");
+    quit();
   });
 
   console.log(
@@ -304,6 +339,9 @@ async function main(): Promise<void> {
   rl.setPrompt("> ");
   prompt();
 
+  let running: AbortController | undefined; // set while a message is being answered
+  let runFinishedAt = 0; // when the last run ended without an interrupt
+  let quitArmed = false;
   // Set when /policy changes the policy mid-conversation; the next message carries a note to the model.
   let policyChangedSinceDescription = false;
   let exitWarned = false;
@@ -388,7 +426,7 @@ async function main(): Promise<void> {
       const result = runTurnsCommand(turnsCmd[1] ?? "", config.maxTurns);
       if (result.maxTurns !== undefined) {
         config = { ...config, maxTurns: result.maxTurns };
-        transcript.log("session", { maxTurns: config.maxTurns });
+        transcript.log("session", { maxTurns: describeTurns(config.maxTurns) });
       }
       console.log(result.output);
       prompt();
@@ -437,6 +475,7 @@ async function main(): Promise<void> {
     }
     const undo = addUserText(messages, text);
     const lengthAfterInput = messages.length;
+    running = new AbortController();
     try {
       const result = await runAgent({
         model,
@@ -446,9 +485,18 @@ async function main(): Promise<void> {
         maxTurns: config.maxTurns,
         maxToolOutputChars: config.maxToolOutputChars,
         hooks,
+        signal: running.signal,
       });
+      if (result.stopReason === "interrupted") {
+        transcript.log("session", { interrupted: true, turns: result.turns, toolCalls: result.toolCalls });
+        // Interrupted before any reply landed: take the message back, as after an error.
+        if (messages.length === lengthAfterInput) {
+          undo();
+          if (noteAdded) policyChangedSinceDescription = true;
+        }
+      }
       // When streaming, the text has already been printed as it arrived.
-      if (!config.stream && result.finalText) say(result.finalText);
+      if (!config.stream && result.finalText && result.stopReason !== "interrupted") say(result.finalText);
       const notice = stopNotice(result, config);
       if (notice) say(notice);
       say(usageLine(result));
@@ -463,6 +511,10 @@ async function main(): Promise<void> {
       spinner.stop();
       endLine();
       console.error(`Error: ${message}`);
+    } finally {
+      if (!running.signal.aborted) runFinishedAt = Date.now();
+      running = undefined;
+      quitArmed = false;
     }
     prompt();
   }

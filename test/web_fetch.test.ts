@@ -233,6 +233,31 @@ test("a server that never answers times out", async () => {
   assert.match(out.content, /timed out after 0\.2 s/);
 });
 
+test("an interrupt stops a fetch in progress, and dismisses a pending approval", async () => {
+  const { webFetch } = tool({ timeoutMs: 10_000 });
+  const registry = createRegistry([webFetch]);
+  const ctrl = new AbortController();
+  const started = Date.now();
+  const pending = registry.dispatch("web_fetch", { url: `${base}/slow` }, ctrl.signal);
+  setTimeout(() => ctrl.abort(), 50);
+  const out = await pending;
+  assert.ok(Date.now() - started < 2000, "stopped well before the 10 s timeout");
+  assert.match(out.content, /^Error: fetching .*\/slow was interrupted by the user\.$/);
+
+  // The approval prompt receives the signal; a prompt dismissed by the interrupt is not a "decline".
+  const asking = createRegistry([
+    createWebFetchTool({
+      pageChars: 100,
+      allowAddress: () => true,
+      confirm: (_url, signal) => new Promise((resolve) => signal.addEventListener("abort", () => resolve(false))),
+    }),
+  ]);
+  const ctrl2 = new AbortController();
+  const waiting = asking.dispatch("web_fetch", { url: `${base}/page` }, ctrl2.signal);
+  ctrl2.abort();
+  assert.match((await waiting).content, /was interrupted by the user/);
+});
+
 // --- helpers --------------------------------------------------------------------------------
 
 test("decodeEntities handles named, decimal and hex entities and leaves unknown ones", () => {

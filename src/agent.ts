@@ -8,7 +8,7 @@ export interface AgentHooks {
   onToolResult?: (call: ToolUseBlock, outcome: ToolOutcome) => void;
 }
 
-export type AgentStopReason = "done" | "max_turns" | "max_tokens" | "refusal";
+export type AgentStopReason = "done" | "max_turns" | "max_tokens" | "refusal" | "interrupted";
 
 export interface AgentResult {
   finalText: string; // text blocks of the last assistant message, joined
@@ -25,6 +25,8 @@ export interface Usage {
   cache_creation_input_tokens: number;
 }
 
+const INTERRUPTED_MESSAGE = "Error: this tool call was not run because the user interrupted. Wait for the user's next message.";
+
 const CUT_OFF_MESSAGE =
   "Error: this tool call was not run because your response hit the max_tokens limit and its input may be incomplete. " +
   "Call the tool again with a shorter response.";
@@ -34,11 +36,14 @@ export async function runAgent(opts: {
   registry: Registry;
   system: string;
   messages: Message[]; // mutated in place: the single source of truth
-  maxTurns: number;
+  maxTurns: number; // Infinity for no limit
   maxToolOutputChars: number;
   hooks?: AgentHooks;
+  // Aborting stops the run at the next safe point, leaving history valid: an interrupted model
+  // call adds nothing, and tool calls that didn't run get an error result.
+  signal?: AbortSignal;
 }): Promise<AgentResult> {
-  const { model, registry, system, messages, maxTurns, maxToolOutputChars, hooks = {} } = opts;
+  const { model, registry, system, messages, maxTurns, maxToolOutputChars, hooks = {}, signal } = opts;
   const tools = registry.definitions();
   const usage: Usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
   let turns = 0;
@@ -53,7 +58,14 @@ export async function runAgent(opts: {
   });
 
   while (turns < maxTurns) {
-    const res = await model({ system, messages, tools });
+    if (signal?.aborted) return finish("interrupted");
+    let res: MessageResponse;
+    try {
+      res = await model({ system, messages, tools, ...(signal ? { signal } : {}) });
+    } catch (err) {
+      if (signal?.aborted) return finish("interrupted");
+      throw err;
+    }
     turns++;
     hooks.onResponse?.(res);
     usage.input_tokens += res.usage?.input_tokens ?? 0;
@@ -74,11 +86,16 @@ export async function runAgent(opts: {
     const cutOff = res.stop_reason === "max_tokens";
     const results: ToolResultBlock[] = [];
     for (const call of calls) {
+      if (signal?.aborted) {
+        // Every tool_use needs a result, or the next request is invalid.
+        results.push({ type: "tool_result", tool_use_id: call.id, content: INTERRUPTED_MESSAGE, is_error: true });
+        continue;
+      }
       toolCalls++;
       hooks.onToolCall?.(call);
       const outcome: ToolOutcome = cutOff
         ? { content: CUT_OFF_MESSAGE, isError: true }
-        : truncate(await registry.dispatch(call.name, call.input), maxToolOutputChars);
+        : truncate(await registry.dispatch(call.name, call.input, signal), maxToolOutputChars);
       hooks.onToolResult?.(call, outcome);
       results.push({
         type: "tool_result",
@@ -89,6 +106,7 @@ export async function runAgent(opts: {
     }
     // All results for this turn in one user message, in the order the model gave.
     messages.push({ role: "user", content: results });
+    if (signal?.aborted) return finish("interrupted");
   }
 
   return finish("max_turns");

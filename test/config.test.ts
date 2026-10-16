@@ -52,6 +52,14 @@ test("MODEL and BASE_URL override; the ANTHROPIC_ names still work but only for 
   assert.equal(loadConfig({ ...legacy, PROVIDER: "deepseek", DEEPSEEK_API_KEY: D, BASE_URL: "https://ds.test/x/" }).baseUrl, "https://ds.test/x");
 });
 
+test("MAX_TURNS takes a whole number or unlimited", () => {
+  assert.equal(loadConfig({ ANTHROPIC_API_KEY: A }).maxTurns, 10);
+  assert.equal(loadConfig({ ANTHROPIC_API_KEY: A, MAX_TURNS: "25" }).maxTurns, 25);
+  assert.equal(loadConfig({ ANTHROPIC_API_KEY: A, MAX_TURNS: "unlimited" }).maxTurns, Infinity);
+  assert.equal(loadConfig({ ANTHROPIC_API_KEY: A, MAX_TURNS: "OFF" }).maxTurns, Infinity);
+  assert.throws(() => loadConfig({ ANTHROPIC_API_KEY: A, MAX_TURNS: "0" }), /MAX_TURNS must be an integer >= 1 or "unlimited" \(got "0"\)/);
+});
+
 test("SHOW_THINKING defaults to off", () => {
   assert.equal(loadConfig({ ANTHROPIC_API_KEY: A }).showThinking, false);
   assert.equal(loadConfig({ ANTHROPIC_API_KEY: A, SHOW_THINKING: "1" }).showThinking, true);
