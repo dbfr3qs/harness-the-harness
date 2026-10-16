@@ -44,6 +44,7 @@ In the REPL:
 | `/provider` | Switch between Claude and DeepSeek from a menu; `/provider deepseek` switches directly (see [Providers](#providers)) |
 | `/model`   | Switch model within the current provider from a menu; `/model <id>` switches directly |
 | `/turns`   | Show the model-call limit per message; `/turns <n>` or `/turns unlimited` changes it for the session |
+| `/context` | Show how full the context window is (see [Context meter](#context-meter)) |
 | `/defaults` | Show what the harness starts with; `/defaults save` keeps this session's provider, models, thinking and turns, `/defaults clear` removes them (see [Saved defaults](#saved-defaults)) |
 | `/thinking` | Show or hide the model's thinking: `/thinking on`, `/thinking off` (see [Seeing the model's thinking](#seeing-the-models-thinking)) |
 
@@ -54,6 +55,20 @@ Responses stream by default: text appears as the model writes it, and an animate
 Each tool call is shown as a dim line as it runs (`→ read_file src/agent.ts`), with a `✗` line under it if the tool returned an error, so a long run of tool calls is never a silent wait. The model's thinking is hidden unless you turn it on with `/thinking on`.
 
 After each answer the REPL prints that exchange's token totals, the number of model calls and the number of tool calls, e.g. `[tokens: 9413 in + 42240 cached, 5951 out · 8 model call(s) · 19 tool call(s)]`. "Cached" is input the provider served from its prompt cache (DeepSeek caches automatically); it is still input the model read, just billed at a lower rate. If the loop stops early, it says why: `MAX_TURNS` reached while the model was still calling tools, `MAX_TOKENS` cut-off, or a refusal. After `MAX_TURNS`, send another message and the model continues where it left off; `/turns <n>` raises the limit first if it needs more room.
+
+### Context meter
+
+Every answer's summary line ends with how much of the model's context window the conversation now fills, e.g. `context 23.5k/1M (2%)`. `/context` shows the detail:
+
+```
+Context: 250,000 of 1,000,000 tokens (25%) · claude-haiku-5-5 · 12 message(s)
+  ████████░░░░░░░░░░░░░░░░░░░░░░  750k left
+```
+
+- **Used** is measured from the last response's `usage`: fresh and cached input plus the output, which is what the next request starts from. Your next message and any tool results add to it.
+- **The window** comes from Anthropic's models API for Claude models (looked up once per model), and from DeepSeek's published 1M-token limit for DeepSeek. If it can't be found, the meter shows tokens only; set `CONTEXT_WINDOW` to supply it.
+- From 80% full, a warning follows the summary line. The harness never drops old messages, so a full context makes requests fail; `/reset` starts a fresh conversation.
+- After `/provider` or `/model`, the reading is marked `≈` until the next response measures it again, since providers count tokens differently (and a provider switch removes thinking blocks).
 
 ### Stopping a run
 
@@ -153,6 +168,7 @@ The harness starts with the provider, model, thinking and turn settings saved in
 | `SHOW_THINKING`         | `false`                           | Start with the model's thinking shown (same as `/thinking on`) |
 | `WEB_POLICY`            | `web-policy.json`                 | Site policy for `web_fetch` (see below). If set explicitly, the file must exist |
 | `HARNESS_SETTINGS`      | `harness.json`                    | Saved defaults file (see [Saved defaults](#saved-defaults)) |
+| `CONTEXT_WINDOW`        | per model                         | Context window size for the meter, for models whose window isn't known |
 | `MAX_TOOL_OUTPUT_CHARS` | `8000`                            | Tool results longer than this are truncated with a visible marker |
 | `WORKSPACE_ROOT`        | current directory                 | Sandbox root for the file tools |
 | `TRANSCRIPT_PATH`       | `./transcripts/<timestamp>.jsonl` | JSONL transcript file |
@@ -320,6 +336,7 @@ src/
   complete.ts     Tab completion for slash commands
   model_command.ts /provider and /model
   settings.ts     harness.json: load, validate, save
+  context_meter.ts context usage, formatting and /context
   defaults_command.ts /defaults
   turns_command.ts /turns
   tools/          workspace sandboxing, private paths, get_time, list_dir, read_file, web_fetch, web_policy

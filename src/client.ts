@@ -206,6 +206,30 @@ export function createAnthropicClient(
 }
 
 /**
+ * The model's context window (max input tokens) from the provider's models API, or undefined if
+ * it can't be found. Only Anthropic serves one. Never throws, and never retries: the meter can
+ * do without it.
+ */
+export async function fetchContextWindow(
+  config: Pick<Config, "provider" | "apiKey" | "baseUrl" | "model">,
+  deps: { fetch?: typeof fetch } = {},
+): Promise<number | undefined> {
+  if (config.provider !== "anthropic") return undefined;
+  try {
+    const res = await (deps.fetch ?? fetch)(`${config.baseUrl}/v1/models/${encodeURIComponent(config.model)}`, {
+      headers: { "x-api-key": config.apiKey, "anthropic-version": "2023-06-01" },
+      signal: AbortSignal.timeout(10_000),
+    });
+    if (!res.ok) return undefined;
+    const body = (await res.json()) as { max_input_tokens?: unknown };
+    const n = body.max_input_tokens;
+    return typeof n === "number" && Number.isSafeInteger(n) && n > 0 ? n : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * True for models whose thinking is hidden unless requested: Claude 5-family models, which think
  * by default with display "omitted". Older Claude models don't think unless thinking is turned on,
  * which would change cost and behaviour, so they're left alone. DeepSeek returns thinking already.

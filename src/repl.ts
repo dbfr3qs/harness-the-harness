@@ -2,7 +2,9 @@ import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { runAgent } from "./agent.ts";
 import type { AgentResult } from "./agent.ts";
-import { createAnthropicClient, returnsThinkingOnRequest } from "./client.ts";
+import { createAnthropicClient, fetchContextWindow, returnsThinkingOnRequest } from "./client.ts";
+import { contextAfter, contextSummary, describeContext, fullWarning, WARN_AT } from "./context_meter.ts";
+import type { ContextReading } from "./context_meter.ts";
 import type { ClientHooks } from "./client.ts";
 import { COMMANDS, completeSlashCommand } from "./complete.ts";
 import type { CompletionState } from "./complete.ts";
@@ -60,11 +62,11 @@ function describeHistory(messages: Message[]): string {
 }
 
 // Cached input is reported separately by the API; it still counts as input the model read.
-function usageLine(result: AgentResult): string {
+function usageLine(result: AgentResult, context?: string): string {
   const u = result.usage;
   const cached = u.cache_read_input_tokens ? ` + ${u.cache_read_input_tokens} cached` : "";
   const tools = result.toolCalls ? ` · ${result.toolCalls} tool call(s)` : "";
-  return `[tokens: ${u.input_tokens + u.cache_creation_input_tokens} in${cached}, ${u.output_tokens} out · ${result.turns} model call(s)${tools}]`;
+  return `[tokens: ${u.input_tokens + u.cache_creation_input_tokens} in${cached}, ${u.output_tokens} out · ${result.turns} model call(s)${tools}${context ? ` · ${context}` : ""}]`;
 }
 
 function describeThinking(config: Config): string {
@@ -230,6 +232,8 @@ async function main(): Promise<void> {
     onResponse: (res) => {
       spinner.stop();
       transcript.log("response", res);
+      contextUsed = contextAfter(res);
+      contextStale = undefined;
       // Streaming already printed thinking as it arrived; otherwise print it now, before any tool calls.
       if (config.showThinking && !config.stream) {
         for (const block of res.content) {
@@ -302,6 +306,29 @@ async function main(): Promise<void> {
   const messages: Message[] = [];
   const lastModel = new Map<Provider, string>(); // per provider, for /provider switching back
 
+  // The context meter: tokens in use after the last response, against the model's window.
+  let contextUsed = 0;
+  let contextStale: string | undefined; // set after a switch, until the next response re-measures
+  const windows = new Map<string, Promise<number | undefined>>(); // looked up once per model
+  const contextWindow = (): Promise<number | undefined> => {
+    if (config.contextWindow) return Promise.resolve(config.contextWindow);
+    const known = PROVIDERS[config.provider].models.find((m) => m.id === config.model)?.contextWindow;
+    if (known) return Promise.resolve(known);
+    const key = `${config.provider}/${config.model}`;
+    let window = windows.get(key);
+    if (!window) {
+      window = fetchContextWindow(config);
+      windows.set(key, window);
+    }
+    return window;
+  };
+  void contextWindow(); // start the lookup now, so it's ready by the first answer
+  const contextReading = async (): Promise<ContextReading> => ({
+    used: contextUsed,
+    window: await contextWindow(),
+    ...(contextStale ? { stale: contextStale } : {}),
+  });
+
   const prompt = () => {
     if (!closed) rl.prompt();
   };
@@ -341,7 +368,7 @@ async function main(): Promise<void> {
   });
 
   console.log(
-    `harness · ${config.provider} / ${config.model} · ${registry.definitions().length} tool(s) · ${config.stream ? "streaming" : "non-streaming"} · /exit /reset /history /policy /provider /model /thinking /turns /defaults`,
+    `harness · ${config.provider} / ${config.model} · ${registry.definitions().length} tool(s) · ${config.stream ? "streaming" : "non-streaming"} · /exit /reset /history /policy /provider /model /thinking /turns /defaults /context`,
   );
   console.log(`transcript: ${transcript.path}`);
   console.log(
@@ -375,8 +402,15 @@ async function main(): Promise<void> {
       break;
     }
     exitWarned = false;
+    if (input === "/context") {
+      console.log(describeContext(await contextReading(), config.model, messages.length));
+      prompt();
+      continue;
+    }
     if (input === "/reset") {
       messages.length = 0;
+      contextUsed = 0;
+      contextStale = undefined;
       // With no history, the tool description can safely pick up the current policy.
       webFetch.refreshDescription();
       policyChangedSinceDescription = false;
@@ -423,7 +457,16 @@ async function main(): Promise<void> {
         : await runModelCommand(modelCmd![1] ?? "", ctx);
       console.log(result.output);
       if (result.settings) {
+        // Providers count tokens differently, and a switch may remove thinking blocks, so the last
+        // reading is only approximate until the next response measures it again.
+        if (messages.length > 0) {
+          const changedProvider = result.settings.provider !== config.provider;
+          contextStale = `measured with ${changedProvider ? `${config.provider} / ` : ""}${config.model}${
+            changedProvider ? ", and providers count tokens differently" : ""
+          }; it updates after the next response`;
+        }
         config = { ...config, ...result.settings };
+        void contextWindow();
         model = createAnthropicClient(config, clientHooks);
         transcript.log("session", {
           provider: config.provider,
@@ -530,7 +573,9 @@ async function main(): Promise<void> {
       if (!config.stream && result.finalText && result.stopReason !== "interrupted") say(result.finalText);
       const notice = stopNotice(result, config);
       if (notice) say(notice);
-      say(usageLine(result));
+      const reading = await contextReading();
+      say(usageLine(result, messages.length ? contextSummary(reading) : undefined));
+      if (reading.window && reading.used / reading.window >= WARN_AT) say(fullWarning(reading.used / reading.window));
     } catch (err) {
       // Nothing from the model landed, so take back the user's text and keep history valid.
       if (messages.length === lengthAfterInput) {

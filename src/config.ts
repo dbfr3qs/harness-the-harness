@@ -10,7 +10,8 @@ export interface ProviderInfo {
   defaultModel: string;
   // Offered by /model. With `strict`, these are the only IDs accepted: DeepSeek silently maps
   // unknown names to another model, so a typo would run (and bill) a model you didn't ask for.
-  models: readonly { id: string; note?: string }[];
+  // contextWindow, where known in advance; Anthropic's is looked up from its models API instead.
+  models: readonly { id: string; note?: string; contextWindow?: number }[];
   strict: boolean;
 }
 
@@ -35,8 +36,9 @@ export const PROVIDERS: Record<Provider, ProviderInfo> = {
     baseUrl: "https://api.deepseek.com/anthropic",
     defaultModel: "deepseek-flash",
     models: [
-      { id: "deepseek-flash", note: "default" },
-      { id: "deepseek-v4-pro", note: "larger, pricier" },
+      // 1M-token context for both, per api-docs.deepseek.com/quick_start/pricing.
+      { id: "deepseek-flash", note: "default", contextWindow: 1_000_000 },
+      { id: "deepseek-v4-pro", note: "larger, pricier", contextWindow: 1_000_000 },
     ],
     strict: true,
   },
@@ -54,6 +56,7 @@ export interface Config {
   maxRetries: number;
   stream: boolean;
   showThinking: boolean; // print the model's readable thinking (toggled with /thinking)
+  contextWindow?: number; // CONTEXT_WINDOW: overrides the model's context window for the meter
   maxToolOutputChars: number;
   workspaceRoot: string;
   transcriptPath: string;
@@ -186,6 +189,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, saved: Settings
     maxRetries: positiveInt(env, "MAX_RETRIES", 3, 0),
     stream: bool(env, "STREAM", true),
     showThinking: bool(env, "SHOW_THINKING", saved.showThinking ?? false),
+    ...(env.CONTEXT_WINDOW?.trim() ? { contextWindow: positiveInt(env, "CONTEXT_WINDOW", 0) } : {}),
     maxToolOutputChars: positiveInt(env, "MAX_TOOL_OUTPUT_CHARS", 8000),
     workspaceRoot: env.WORKSPACE_ROOT || process.cwd(),
     transcriptPath: env.TRANSCRIPT_PATH || join("transcripts", `${timestamp()}.jsonl`),
