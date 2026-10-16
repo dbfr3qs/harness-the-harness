@@ -8,6 +8,7 @@ import { parseSse } from "../src/sse.ts";
 import type { ModelRequest } from "../src/types.ts";
 
 const config: ClientConfig = {
+  provider: "anthropic",
   apiKey: "sk-ant-test-SECRET",
   baseUrl: "https://api.example.test",
   model: "claude-test",
@@ -112,6 +113,25 @@ test("a real captured tool-use stream rebuilds the same message the API returns"
     },
   ]);
   assert.deepEqual(deltas, ["Re", "ading package", ".json now."]);
+});
+
+test("a real captured DeepSeek stream (thinking, then a tool call with empty input) rebuilds correctly", async () => {
+  const raw = await readFile(new URL("./fixtures/deepseek-tool-use.sse", import.meta.url), "utf8");
+  const deltas: string[] = [];
+  const ds: ClientConfig = { ...config, provider: "deepseek", model: "deepseek-flash" };
+  const { model } = client([sseResponse(raw)], { onTextDelta: (t) => deltas.push(t) }, ds);
+  const res = await model(req);
+  assert.equal(res.stop_reason, "tool_use");
+  assert.equal(res.usage.output_tokens, 33);
+  assert.deepEqual(res.content, [
+    {
+      type: "thinking",
+      thinking: "The user wants the current time. Call get_time.",
+      signature: "6ae94ce6-a400-4743-b944-5e26f3be0b41",
+    },
+    { type: "tool_use", id: "call_00_BVsbFXIgOkaT4Fso2vwq4266", name: "get_time", input: {} },
+  ]);
+  assert.deepEqual(deltas, [], "thinking is not printed as text");
 });
 
 test("thinking, signature and citations are rebuilt; thinking is not shown as text", async () => {

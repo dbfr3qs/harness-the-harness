@@ -2,8 +2,14 @@ import { createInterface } from "node:readline/promises";
 import { runAgent } from "./agent.ts";
 import type { AgentResult } from "./agent.ts";
 import { createAnthropicClient } from "./client.ts";
-import { ConfigError, loadConfig } from "./config.ts";
-import type { Config } from "./config.ts";
+import type { ClientHooks } from "./client.ts";
+import { COMMANDS, completeSlashCommand } from "./complete.ts";
+import type { CompletionState } from "./complete.ts";
+import { ConfigError, loadConfig, PROVIDERS } from "./config.ts";
+import type { Config, Provider } from "./config.ts";
+import { selectFromMenu } from "./menu.ts";
+import { runModelCommand, runProviderCommand } from "./model_command.ts";
+import type { ModelCommandContext } from "./model_command.ts";
 import { createTranscriptLogger } from "./log.ts";
 import { createPolicyStore, runPolicyCommand } from "./policy_command.ts";
 import { createRegistry } from "./registry.ts";
@@ -88,14 +94,20 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  // Tab completes slash commands; the state is filled in once the policy store exists.
+  let completionState = (): CompletionState => ({ models: [], policyPatterns: [] });
+  const rl = createInterface({
+    input: process.stdin,
+    output: process.stdout,
+    completer: (line: string) => completeSlashCommand(line, completionState()),
+  });
   // With piped input, stdin can hit EOF (closing readline) while buffered lines are still being processed.
   let closed = false;
   rl.on("close", () => {
     closed = true;
   });
 
-  const transcript = createTranscriptLogger(config.transcriptPath, { secrets: [config.apiKey] });
+  const transcript = createTranscriptLogger(config.transcriptPath, { secrets: config.secrets });
 
   // Streamed text arrives in pieces, so track whether the cursor is at the start of a line.
   // The spinner redraws its line with \r, so it must only ever start on an empty line.
@@ -115,7 +127,7 @@ async function main(): Promise<void> {
     write(`${line}\n`);
   };
 
-  const model = createAnthropicClient(config, {
+  const clientHooks: ClientHooks = {
     onRequest: (body) => {
       transcript.log("request", body);
       endLine();
@@ -132,7 +144,9 @@ async function main(): Promise<void> {
       spinner.stop();
       write(text);
     },
-  });
+  };
+  // Replaced when /provider or /model changes the settings.
+  let model = createAnthropicClient(config, clientHooks);
   const hooks: AgentHooks = {
     onResponse: (res) => {
       spinner.stop();
@@ -168,6 +182,10 @@ async function main(): Promise<void> {
   };
 
   const policyStore = createPolicyStore(config.webPolicyPath, webPolicy);
+  completionState = () => ({
+    models: PROVIDERS[config.provider].models.map((m) => m.id),
+    policyPatterns: policyStore.current().policy.rules.map((r) => r.match),
+  });
   const webFetch = createWebFetchTool({
     confirm: confirmFetch,
     pageChars: Math.max(500, config.maxToolOutputChars - 500),
@@ -182,6 +200,7 @@ async function main(): Promise<void> {
     webFetch,
   ]);
   const messages: Message[] = [];
+  const lastModel = new Map<Provider, string>(); // per provider, for /provider switching back
 
   const prompt = () => {
     if (!closed) rl.prompt();
@@ -194,7 +213,7 @@ async function main(): Promise<void> {
   });
 
   console.log(
-    `harness · ${config.model} · ${registry.definitions().length} tool(s) · ${config.stream ? "streaming" : "non-streaming"} · /exit /reset /history /policy`,
+    `harness · ${config.provider} / ${config.model} · ${registry.definitions().length} tool(s) · ${config.stream ? "streaming" : "non-streaming"} · /exit /reset /history /policy /provider /model`,
   );
   console.log(`transcript: ${transcript.path}`);
   console.log(
@@ -255,8 +274,45 @@ async function main(): Promise<void> {
       prompt();
       continue;
     }
+    const providerCmd = /^\/provider(?:\s+(.*))?$/.exec(input);
+    const modelCmd = /^\/model(?:\s+(.*))?$/.exec(input);
+    if (providerCmd || modelCmd) {
+      const ctx: ModelCommandContext = {
+        env: process.env,
+        current: { provider: config.provider, apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model },
+        messages,
+        lastModel,
+        ...(process.stdin.isTTY && process.stdout.isTTY
+          ? { choose: (title, items, initial) => selectFromMenu(process.stdin, process.stdout, title, items, initial) }
+          : {}),
+      };
+      const result = providerCmd
+        ? await runProviderCommand(providerCmd[1] ?? "", ctx)
+        : await runModelCommand(modelCmd![1] ?? "", ctx);
+      console.log(result.output);
+      if (result.settings) {
+        config = { ...config, ...result.settings };
+        model = createAnthropicClient(config, clientHooks);
+        transcript.log("session", {
+          provider: config.provider,
+          model: config.model,
+          baseUrl: config.baseUrl,
+          ...(result.thinkingRemoved ? { thinkingRemoved: result.thinkingRemoved } : {}),
+        });
+      }
+      prompt();
+      continue;
+    }
     if (input === "/history") {
       console.log(describeHistory(messages));
+      prompt();
+      continue;
+    }
+
+    // A mistyped command shouldn't go to the model as a message. Paths like /etc/hosts still do.
+    const unknown = /^\/[a-z]+(?=\s|$)/i.exec(input);
+    if (unknown && !COMMANDS.includes(unknown[0])) {
+      console.log(`Unknown command ${unknown[0]}. Commands: ${COMMANDS.join(" ")} (Tab completes them)`);
       prompt();
       continue;
     }

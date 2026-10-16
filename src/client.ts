@@ -1,10 +1,11 @@
+import { PROVIDERS } from "./config.ts";
 import type { Config } from "./config.ts";
 import { createMessageAccumulator, parseSse, StreamErrorEvent, StreamProtocolError } from "./sse.ts";
 import type { MessageResponse, ModelFn, ModelRequest } from "./types.ts";
 
 export type ClientConfig = Pick<
   Config,
-  "apiKey" | "baseUrl" | "model" | "maxTokens" | "timeoutMs" | "maxRetries" | "stream"
+  "provider" | "apiKey" | "baseUrl" | "model" | "maxTokens" | "timeoutMs" | "maxRetries" | "stream"
 >;
 
 export interface ClientHooks {
@@ -34,9 +35,11 @@ export function createAnthropicClient(
   const doFetch = deps.fetch ?? fetch;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
   const url = `${config.baseUrl}/v1/messages`;
+  const { label, keyVar } = PROVIDERS[config.provider];
 
   // Belt and braces: no error message leaves this module containing the key.
-  const redact = (s: string) => s.split(config.apiKey).join("[redacted]");
+  // Also masks provider-masked fragments such as DeepSeek's "Your api key: ****abcd".
+  const redact = (s: string) => s.split(config.apiKey).join("[redacted]").replace(/\*{3,}[\w-]{1,8}/g, "[redacted]");
 
   // `shown` tracks whether any text reached onTextDelta during this call. Once it has,
   // a retry would print the answer twice, so failures after that point are fatal.
@@ -82,8 +85,8 @@ export function createAnthropicClient(
         if (RETRYABLE_STATUS.has(res.status)) {
           return { kind: "retry", reason: detail, retryAfterMs: parseRetryAfter(res.headers.get("retry-after")) };
         }
-        const hint = res.status === 401 ? " (check ANTHROPIC_API_KEY)" : "";
-        throw new Error(`Anthropic API error: ${detail}${hint}`);
+        const hint = res.status === 401 ? ` (check ${keyVar})` : "";
+        throw new Error(`${label} API error: ${detail}${hint}`);
       }
 
       if (!config.stream) {
@@ -93,7 +96,7 @@ export function createAnthropicClient(
         } catch (err) {
           return { kind: "retry", reason: describeNetworkError(err, config.timeoutMs) };
         }
-        return { kind: "ok", response: parseResponse(text) };
+        return { kind: "ok", response: parseResponse(text, label) };
       }
 
       return await readStream(res, touch, shown);
@@ -106,7 +109,7 @@ export function createAnthropicClient(
     if (!res.body) return { kind: "retry", reason: "stream response had no body" };
     const acc = createMessageAccumulator();
     const failed = (reason: string): Attempt => {
-      if (shown.value) throw new Error(`Anthropic API stream failed after output began: ${reason}`);
+      if (shown.value) throw new Error(`${label} API stream failed after output began: ${reason}`);
       return { kind: "retry", reason };
     };
 
@@ -127,9 +130,9 @@ export function createAnthropicClient(
     } catch (err) {
       if (err instanceof StreamErrorEvent) {
         if (RETRYABLE_STREAM_ERRORS.has(err.errorType)) return failed(`stream error ${err.message}`);
-        throw new Error(`Anthropic API error in stream: ${err.message}`);
+        throw new Error(`${label} API error in stream: ${err.message}`);
       }
-      if (err instanceof StreamProtocolError) throw new Error(`Anthropic API stream error: ${err.message}`);
+      if (err instanceof StreamProtocolError) throw new Error(`${label} API stream error: ${err.message}`);
       return failed(describeNetworkError(err, config.timeoutMs));
     }
 
@@ -163,7 +166,7 @@ export function createAnthropicClient(
       if (result.kind === "ok") return result.response;
 
       if (n >= config.maxRetries) {
-        throw new Error(redact(`Anthropic API request failed after ${n + 1} attempt(s): ${result.reason}`));
+        throw new Error(redact(`${label} API request failed after ${n + 1} attempt(s): ${result.reason}`));
       }
       const delayMs = result.retryAfterMs ?? backoff(n);
       hooks.onRetry?.({ attempt: n + 1, delayMs, reason: redact(result.reason) });
@@ -211,15 +214,15 @@ function errorDetail(text: string): string {
   return snippet ? ` ${snippet}` : "";
 }
 
-function parseResponse(text: string): MessageResponse {
+function parseResponse(text: string, label: string): MessageResponse {
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch {
-    throw new Error(`Anthropic API returned invalid JSON: ${text.slice(0, 300)}`);
+    throw new Error(`${label} API returned invalid JSON: ${text.slice(0, 300)}`);
   }
   if (typeof parsed !== "object" || parsed === null || !Array.isArray((parsed as { content?: unknown }).content)) {
-    throw new Error(`Anthropic API response has no content array: ${text.slice(0, 300)}`);
+    throw new Error(`${label} API response has no content array: ${text.slice(0, 300)}`);
   }
   return parsed as MessageResponse;
 }

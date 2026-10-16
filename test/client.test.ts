@@ -6,6 +6,7 @@ import type { ModelRequest } from "../src/types.ts";
 
 const KEY = "sk-ant-test-SECRET-0123456789";
 const config: ClientConfig = {
+  provider: "anthropic",
   apiKey: KEY,
   baseUrl: "https://api.example.test",
   model: "claude-test",
@@ -41,9 +42,9 @@ function scriptedFetch(script: (Response | Error)[]) {
   return { fetchImpl, calls };
 }
 
-function client(script: (Response | Error)[], sleeps: number[] = []) {
+function client(script: (Response | Error)[], sleeps: number[] = [], cfg = config) {
   const { fetchImpl, calls } = scriptedFetch(script);
-  const model = createAnthropicClient(config, {}, {
+  const model = createAnthropicClient(cfg, {}, {
     fetch: fetchImpl,
     sleep: async (ms) => {
       sleeps.push(ms);
@@ -77,6 +78,25 @@ test("401 error is clear and never contains the key", async () => {
     assert.match(err.message, /401 authentication_error/);
     assert.match(err.message, /check ANTHROPIC_API_KEY/);
     assert.ok(!err.message.includes(KEY), "key leaked into error");
+    return true;
+  });
+});
+
+test("DeepSeek: same request shape under its base URL; errors name DeepSeek and its key variable", async () => {
+  const ds: ClientConfig = { ...config, provider: "deepseek", baseUrl: "https://api.deepseek.com/anthropic", model: "deepseek-flash" };
+  const ok = client([json(200, okBody)], [], ds);
+  await ok.model(req);
+  assert.equal(ok.calls[0]!.url, "https://api.deepseek.com/anthropic/v1/messages");
+  assert.equal((ok.calls[0]!.init.headers as Record<string, string>)["x-api-key"], KEY);
+
+  const message = `Authentication Fails, Your api key: ****${KEY.slice(-4)} is invalid, full: ${KEY}`;
+  const bad = client([json(401, { error: { type: "authentication_error", message } })], [], ds);
+  await assert.rejects(bad.model(req), (err: Error) => {
+    assert.match(err.message, /^DeepSeek API error: HTTP 401 authentication_error/);
+    assert.match(err.message, /check DEEPSEEK_API_KEY/);
+    assert.match(err.message, /Your api key: \[redacted\] is invalid/);
+    assert.ok(!err.message.includes(KEY), "key leaked into error");
+    assert.ok(!err.message.includes(KEY.slice(-4)), "masked key fragment leaked into error");
     return true;
   });
 });

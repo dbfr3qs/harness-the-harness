@@ -1,6 +1,6 @@
 # harness
 
-A zero-dependency TypeScript CLI that chats with Claude through the Anthropic Messages API and lets it call tools in a loop until it gives a final answer.
+A zero-dependency TypeScript CLI that chats with a model through the Anthropic Messages API and lets it call tools in a loop until it gives a final answer. It works with Claude (Anthropic) or with DeepSeek through DeepSeek's Anthropic-compatible endpoint; see [Providers](#providers).
 
 - No runtime dependencies: plain `fetch`, `node:readline/promises`, `node:fs/promises`, `node:test`.
 - Runs `.ts` files directly on Node 24 or later (type stripping); `tsc` is used only for type-checking.
@@ -17,9 +17,10 @@ A zero-dependency TypeScript CLI that chats with Claude through the Anthropic Me
 
    ```sh
    ANTHROPIC_API_KEY=sk-ant-...
+   DEEPSEEK_API_KEY=sk-...        # only needed for PROVIDER=deepseek
    ```
 
-   `npm start` loads `.env` automatically if it exists. You can also export the variable in your shell instead. The key is never printed, logged, written to a transcript or included in an error message.
+   `npm start` loads `.env` automatically if it exists. You can also export the variables in your shell instead. Keys are never printed, logged, written to a transcript or included in an error message, and `read_file` refuses to open `.env`.
 
 ## Running
 
@@ -40,18 +41,55 @@ In the REPL:
 | `/reset`   | Clear conversation history |
 | `/history` | Show message count, roles and block types |
 | `/policy`  | View or change the `web_fetch` site policy (see [Changing the policy from the REPL](#changing-the-policy-from-the-repl)) |
+| `/provider` | Switch between Claude and DeepSeek from a menu; `/provider deepseek` switches directly (see [Providers](#providers)) |
+| `/model`   | Switch model within the current provider from a menu; `/model <id>` switches directly |
+
+Press Tab to complete commands and their arguments (provider names, the current provider's models, `/policy` subcommands and existing rule patterns); press it twice to list the options. A line that starts with an unknown `/word` is reported as an unknown command rather than sent to the model; paths such as `/etc/hosts` still go through.
 
 Responses stream by default: text appears as the model writes it, and an animated row of dots (one to five and back) shows while it's waiting for the first output of each model call. The dots only appear when output is a terminal. Set `STREAM=0` to use plain non-streaming requests.
 
 After each answer the REPL prints that exchange's input and output token totals and the number of model calls. If the loop stops early, it says why: `MAX_TURNS` reached, `MAX_TOKENS` cut-off, or a refusal. After `MAX_TURNS`, send another message and the model continues where it left off.
 
+## Providers
+
+Both providers are reached with the same client, because DeepSeek serves the Anthropic Messages API at `https://api.deepseek.com/anthropic`. Pick one per run:
+
+```sh
+npm start                                   # Claude
+PROVIDER=deepseek npm start                 # DeepSeek, deepseek-flash
+PROVIDER=deepseek MODEL=deepseek-v4-pro npm start
+```
+
+The startup line shows which is in use (`harness · deepseek / deepseek-flash · ...`). Each provider only ever receives its own key.
+
+### Switching during a session
+
+`/provider` and `/model` open a menu: move with ↑/↓ (or j/k), press Enter or a number to choose, Esc to cancel. A provider whose key isn't set is listed but greyed out. Without a terminal (piped input) they print the choices instead; `/provider <name>` and `/model <id>` work either way.
+
+- **The conversation carries over.** Switching provider keeps the history, with one exception: thinking blocks are removed, because each provider only accepts thinking blocks it wrote (Claude rejects DeepSeek's with a 400). Switching model within a provider keeps everything.
+- **Each provider remembers its model** for the session, so switching away and back returns to the model you were using. `MODEL` and `BASE_URL` belong to the provider named by `PROVIDER`; the other provider uses its defaults.
+- **`/model` lists the usual models.** For Claude, `/model <id>` also accepts any other model ID (Anthropic reports unknown ones clearly); for DeepSeek only the listed models are accepted.
+- Switches last for the session only. To change the default, set `PROVIDER` and `MODEL` in `.env`.
+- Each switch is logged in the transcript as a `session` line with the provider, model and base URL.
+
+Things to know about DeepSeek:
+
+- **Model names are checked.** DeepSeek silently maps unknown model names to `deepseek-flash` (and `claude-opus*` names to the pricier `deepseek-v4-pro`), so with `PROVIDER=deepseek` the harness only accepts `deepseek-flash` and `deepseek-v4-pro`. If DeepSeek adds models, update the list in `src/config.ts`.
+- **It thinks by default.** Responses start with a `thinking` block, which is kept in history and sent back verbatim like Claude's. It is not printed.
+- **`is_error` on tool results is ignored**, so the harness's tool errors always begin with `Error:` in the text itself.
+- **Data goes to DeepSeek.** Your messages, and anything the tools return (workspace file contents, fetched pages), are sent to DeepSeek's servers under DeepSeek's terms.
+- Token counts may look lower than Claude's for the same conversation: DeepSeek reports cached input separately in `cache_read_input_tokens`, which the REPL's total doesn't include.
+
 ## Environment variables
 
 | Variable                | Default                           | Purpose |
 | ----------------------- | --------------------------------- | ------- |
-| `ANTHROPIC_API_KEY`     | none (required)                   | API key; never logged |
-| `ANTHROPIC_BASE_URL`    | `https://api.anthropic.com`       | API host |
-| `ANTHROPIC_MODEL`       | `claude-sonnet-5-5`               | Model ID (`claude-haiku-5-5` is cheaper for testing) |
+| `PROVIDER`              | `anthropic`                       | `anthropic` or `deepseek` |
+| `ANTHROPIC_API_KEY`     | none                              | Key for `PROVIDER=anthropic` (required then); never logged |
+| `DEEPSEEK_API_KEY`      | none                              | Key for `PROVIDER=deepseek` (required then); never logged |
+| `MODEL`                 | per provider                      | `claude-sonnet-5-5` or `deepseek-flash` (`claude-haiku-5-5` is cheaper for testing) |
+| `BASE_URL`              | per provider                      | `https://api.anthropic.com` or `https://api.deepseek.com/anthropic` |
+| `ANTHROPIC_MODEL`, `ANTHROPIC_BASE_URL` | none              | Older names for `MODEL` and `BASE_URL`; used only with `PROVIDER=anthropic`, and `MODEL`/`BASE_URL` win |
 | `MAX_TOKENS`            | `4096`                            | `max_tokens` per request |
 | `MAX_TURNS`             | `10`                              | Model calls per user message |
 | `TIMEOUT_MS`            | `120000`                          | Idle timeout: the longest wait for the next piece of a response (the whole response when not streaming) |
@@ -196,14 +234,14 @@ Each REPL session appends one JSON object per line to `TRANSCRIPT_PATH`:
 { "ts": "2026-10-15T06:37:12.345Z", "kind": "request", "data": { "model": "...", "messages": [ ... ] } }
 ```
 
-`kind` is one of `request`, `response`, `tool_call`, `tool_result` or `error`. Request bodies and full responses (including `usage`) are logged; headers and the API key never are. If logging fails, the REPL prints one warning and carries on.
+`kind` is one of `request`, `response`, `tool_call`, `tool_result`, `error` or `session` (a `/provider` or `/model` switch). Request bodies and full responses (including `usage`) are logged; headers and the API key never are. If logging fails, the REPL prints one warning and carries on.
 
 ## Layout
 
 ```
 src/
   types.ts        content block, message, tool and response types
-  config.ts       settings from env vars with defaults
+  config.ts       settings from env vars with defaults; the provider table
   client.ts       createAnthropicClient(): fetch + timeout + retry, streaming or not
   sse.ts          SSE parsing; rebuilds the streamed message exactly as the API would return it
   registry.ts     defineTool, createRegistry, dispatch
@@ -211,11 +249,14 @@ src/
   log.ts          JSONL transcript writer
   repl.ts         CLI entry point
   spinner.ts      waiting animation
+  menu.ts         arrow-key menu for the terminal
+  complete.ts     Tab completion for slash commands
+  model_command.ts /provider and /model
   tools/          workspace sandboxing, get_time, list_dir, read_file, web_fetch, web_policy
 test/             unit tests (fake model, fake fetch, temp dirs)
 ```
 
-Dependencies flow one way: `repl` → `agent` → `client` and `registry` → `tools`. `agent.ts` depends only on the `ModelFn` type, so another provider can be added as a new client without touching the loop.
+Dependencies flow one way: `repl` → `agent` → `client` and `registry` → `tools`. `agent.ts` depends only on the `ModelFn` type, so another provider can be added as a new client without touching the loop. DeepSeek didn't need one: it speaks the same protocol, so `config.ts` just picks its key, base URL and model.
 
 Streaming lives entirely in the client. It rebuilds the stream into the same message object a non-streaming request returns, including thinking signatures and tool inputs, so the agent loop and history handling are identical in both modes. A stream that fails before any text is shown is retried; one that fails after text has appeared is reported as an error instead, so an answer is never printed twice. An unknown delta type is an error rather than being skipped, because a block that can't be rebuilt exactly would corrupt the history.
 

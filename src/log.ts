@@ -1,7 +1,7 @@
 import { appendFile, mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 
-export type LogKind = "request" | "response" | "tool_call" | "tool_result" | "error";
+export type LogKind = "request" | "response" | "tool_call" | "tool_result" | "error" | "session";
 
 export interface TranscriptLogger {
   path: string;
