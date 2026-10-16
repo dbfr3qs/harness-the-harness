@@ -52,6 +52,11 @@ test("MODEL and BASE_URL override; the ANTHROPIC_ names still work but only for 
   assert.equal(loadConfig({ ...legacy, PROVIDER: "deepseek", DEEPSEEK_API_KEY: D, BASE_URL: "https://ds.test/x/" }).baseUrl, "https://ds.test/x");
 });
 
+test("SHOW_THINKING defaults to off", () => {
+  assert.equal(loadConfig({ ANTHROPIC_API_KEY: A }).showThinking, false);
+  assert.equal(loadConfig({ ANTHROPIC_API_KEY: A, SHOW_THINKING: "1" }).showThinking, true);
+});
+
 test("every key in the environment is listed for transcript scrubbing", () => {
   assert.deepEqual(loadConfig({ ANTHROPIC_API_KEY: A, DEEPSEEK_API_KEY: D }).secrets, [A, D]);
   assert.deepEqual(loadConfig({ PROVIDER: "deepseek", DEEPSEEK_API_KEY: D }).secrets, [D]);

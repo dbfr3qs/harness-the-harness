@@ -52,6 +52,7 @@ export interface Config {
   timeoutMs: number;
   maxRetries: number;
   stream: boolean;
+  showThinking: boolean; // print the model's readable thinking (toggled with /thinking)
   maxToolOutputChars: number;
   workspaceRoot: string;
   transcriptPath: string;
@@ -154,6 +155,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     timeoutMs: positiveInt(env, "TIMEOUT_MS", 120_000),
     maxRetries: positiveInt(env, "MAX_RETRIES", 3, 0),
     stream: bool(env, "STREAM", true),
+    showThinking: bool(env, "SHOW_THINKING", false),
     maxToolOutputChars: positiveInt(env, "MAX_TOOL_OUTPUT_CHARS", 8000),
     workspaceRoot: env.WORKSPACE_ROOT || process.cwd(),
     transcriptPath: env.TRANSCRIPT_PATH || join("transcripts", `${timestamp()}.jsonl`),

@@ -43,14 +43,16 @@ In the REPL:
 | `/policy`  | View or change the `web_fetch` site policy (see [Changing the policy from the REPL](#changing-the-policy-from-the-repl)) |
 | `/provider` | Switch between Claude and DeepSeek from a menu; `/provider deepseek` switches directly (see [Providers](#providers)) |
 | `/model`   | Switch model within the current provider from a menu; `/model <id>` switches directly |
+| `/turns`   | Show the model-call limit per message; `/turns <n>` changes it for the session |
+| `/thinking` | Show or hide the model's thinking: `/thinking on`, `/thinking off` (see [Seeing the model's thinking](#seeing-the-models-thinking)) |
 
 Press Tab to complete commands and their arguments (provider names, the current provider's models, `/policy` subcommands and existing rule patterns); press it twice to list the options. A line that starts with an unknown `/word` is reported as an unknown command rather than sent to the model; paths such as `/etc/hosts` still go through.
 
 Responses stream by default: text appears as the model writes it, and an animated row of dots (one to five and back) shows while it's waiting for the first output of each model call. The dots only appear when output is a terminal. Set `STREAM=0` to use plain non-streaming requests.
 
-Each tool call is shown as a dim line as it runs (`→ read_file src/agent.ts`), with a `✗` line under it if the tool returned an error, so a long run of tool calls is never a silent wait. The model's thinking is not shown.
+Each tool call is shown as a dim line as it runs (`→ read_file src/agent.ts`), with a `✗` line under it if the tool returned an error, so a long run of tool calls is never a silent wait. The model's thinking is hidden unless you turn it on with `/thinking on`.
 
-After each answer the REPL prints that exchange's token totals, the number of model calls and the number of tool calls, e.g. `[tokens: 9413 in + 42240 cached, 5951 out · 8 model call(s) · 19 tool call(s)]`. "Cached" is input the provider served from its prompt cache (DeepSeek caches automatically); it is still input the model read, just billed at a lower rate. If the loop stops early, it says why: `MAX_TURNS` reached while the model was still calling tools, `MAX_TOKENS` cut-off, or a refusal. After `MAX_TURNS`, send another message and the model continues where it left off.
+After each answer the REPL prints that exchange's token totals, the number of model calls and the number of tool calls, e.g. `[tokens: 9413 in + 42240 cached, 5951 out · 8 model call(s) · 19 tool call(s)]`. "Cached" is input the provider served from its prompt cache (DeepSeek caches automatically); it is still input the model read, just billed at a lower rate. If the loop stops early, it says why: `MAX_TURNS` reached while the model was still calling tools, `MAX_TOKENS` cut-off, or a refusal. After `MAX_TURNS`, send another message and the model continues where it left off; `/turns <n>` raises the limit first if it needs more room.
 
 ## Providers
 
@@ -82,6 +84,18 @@ Things to know about DeepSeek:
 - **Data goes to DeepSeek.** Your messages, and anything the tools return (workspace file contents, fetched pages), are sent to DeepSeek's servers under DeepSeek's terms.
 - DeepSeek caches repeated input automatically, so most of a long tool loop's input shows up as `cached` in the token line.
 
+## Seeing the model's thinking
+
+`/thinking on` prints the model's thinking dimmed, after a `✻`, before its answer and between tool calls. It streams as it arrives (or prints with each response when `STREAM=0`). `/thinking off` hides it again. Either way, thinking is kept in the conversation and written to the transcript.
+
+What you see depends on the model:
+
+- **DeepSeek** returns its thinking as written. Nothing about the request changes.
+- **Claude 5 models** (`claude-*-5*`) think by default but return the thinking empty unless asked. With thinking shown, requests add `"thinking": {"type": "adaptive", "display": "summarized"}`, and Claude returns a summary of its reasoning, written by a separate model. Claude never returns the raw reasoning. Cost is the same either way, since the model thinks regardless; when streaming, the answer starts a little later because the summary streams first.
+- **Older Claude models** (4.8 and earlier) only think when thinking is turned on in the request, which changes cost and behaviour, so the harness doesn't do it and there is nothing to show.
+
+Models may skip thinking on simple requests, so not every answer has any.
+
 ## Environment variables
 
 | Variable                | Default                           | Purpose |
@@ -93,10 +107,11 @@ Things to know about DeepSeek:
 | `BASE_URL`              | per provider                      | `https://api.anthropic.com` or `https://api.deepseek.com/anthropic` |
 | `ANTHROPIC_MODEL`, `ANTHROPIC_BASE_URL` | none              | Older names for `MODEL` and `BASE_URL`; used only with `PROVIDER=anthropic`, and `MODEL`/`BASE_URL` win |
 | `MAX_TOKENS`            | `4096`                            | `max_tokens` per request |
-| `MAX_TURNS`             | `10`                              | Model calls per user message |
+| `MAX_TURNS`             | `10`                              | Model calls per user message; `/turns <n>` changes it for the session |
 | `TIMEOUT_MS`            | `120000`                          | Idle timeout: the longest wait for the next piece of a response (the whole response when not streaming) |
 | `MAX_RETRIES`           | `3`                               | Retries on network errors, timeouts, 429, 500 and 529 (and overloaded errors mid-stream, until text has been shown) |
 | `STREAM`                | `true`                            | Stream responses (SSE); `0`/`false` for non-streaming requests |
+| `SHOW_THINKING`         | `false`                           | Start with the model's thinking shown (same as `/thinking on`) |
 | `WEB_POLICY`            | `web-policy.json`                 | Site policy for `web_fetch` (see below). If set explicitly, the file must exist |
 | `MAX_TOOL_OUTPUT_CHARS` | `8000`                            | Tool results longer than this are truncated with a visible marker |
 | `WORKSPACE_ROOT`        | current directory                 | Sandbox root for the file tools |

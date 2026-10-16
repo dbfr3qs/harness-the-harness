@@ -6,12 +6,14 @@ import type { MessageResponse, ModelFn, ModelRequest } from "./types.ts";
 export type ClientConfig = Pick<
   Config,
   "provider" | "apiKey" | "baseUrl" | "model" | "maxTokens" | "timeoutMs" | "maxRetries" | "stream"
->;
+> &
+  Partial<Pick<Config, "showThinking">>;
 
 export interface ClientHooks {
   onRequest?: (body: unknown) => void; // request body only, never headers
   onRetry?: (info: { attempt: number; delayMs: number; reason: string }) => void;
   onTextDelta?: (text: string) => void; // streaming only: text as it arrives
+  onThinkingDelta?: (text: string) => void; // streaming only: readable thinking as it arrives
 }
 
 export interface ClientDeps {
@@ -121,10 +123,13 @@ export function createAnthropicClient(
         } catch {
           throw new StreamProtocolError(`stream sent invalid JSON: ${sse.data.slice(0, 300)}`);
         }
-        const text = acc.apply(ev);
-        if (text) {
+        const out = acc.apply(ev);
+        if (out?.kind === "text") {
           shown.value = true;
-          hooks.onTextDelta?.(text);
+          hooks.onTextDelta?.(out.text);
+        } else if (out?.kind === "thinking" && config.showThinking && hooks.onThinkingDelta) {
+          shown.value = true; // printed thinking would be printed twice by a retry, just like text
+          hooks.onThinkingDelta(out.text);
         }
       }
     } catch (err) {
@@ -151,6 +156,11 @@ export function createAnthropicClient(
       messages: req.messages,
     };
     if (req.tools.length > 0) body.tools = req.tools;
+    // Claude 5 models think by default but return the thinking empty unless asked for a summary.
+    // This changes only what comes back, not how much the model thinks or what it costs.
+    if (config.showThinking && returnsThinkingOnRequest(config.provider, config.model)) {
+      body.thinking = { type: "adaptive", display: "summarized" };
+    }
     if (config.stream) body.stream = true;
     hooks.onRequest?.(body);
     const payload = JSON.stringify(body);
@@ -173,6 +183,15 @@ export function createAnthropicClient(
       await sleep(delayMs);
     }
   };
+}
+
+/**
+ * True for models whose thinking is hidden unless requested: Claude 5-family models, which think
+ * by default with display "omitted". Older Claude models don't think unless thinking is turned on,
+ * which would change cost and behaviour, so they're left alone. DeepSeek returns thinking already.
+ */
+export function returnsThinkingOnRequest(provider: Config["provider"], model: string): boolean {
+  return provider === "anthropic" && /^claude-[a-z]+-5(?:-|$)/.test(model);
 }
 
 function backoff(n: number): number {

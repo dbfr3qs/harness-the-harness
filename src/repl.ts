@@ -2,7 +2,7 @@ import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { runAgent } from "./agent.ts";
 import type { AgentResult } from "./agent.ts";
-import { createAnthropicClient } from "./client.ts";
+import { createAnthropicClient, returnsThinkingOnRequest } from "./client.ts";
 import type { ClientHooks } from "./client.ts";
 import { COMMANDS, completeSlashCommand } from "./complete.ts";
 import type { CompletionState } from "./complete.ts";
@@ -15,6 +15,7 @@ import { createTranscriptLogger } from "./log.ts";
 import { createPolicyStore, runPolicyCommand } from "./policy_command.ts";
 import { createRegistry } from "./registry.ts";
 import { createSpinner } from "./spinner.ts";
+import { runTurnsCommand } from "./turns_command.ts";
 import { getTimeTool } from "./tools/get_time.ts";
 import { createListDirTool } from "./tools/list_dir.ts";
 import type { PrivatePath } from "./tools/private_paths.ts";
@@ -62,13 +63,24 @@ function usageLine(result: AgentResult): string {
   return `[tokens: ${u.input_tokens + u.cache_creation_input_tokens} in${cached}, ${u.output_tokens} out · ${result.turns} model call(s)${tools}]`;
 }
 
+function describeThinking(config: Config): string {
+  if (!config.showThinking) return "Thinking: hidden. /thinking on to show it.";
+  const what =
+    config.provider === "deepseek"
+      ? "DeepSeek returns its thinking as written."
+      : returnsThinkingOnRequest(config.provider, config.model)
+        ? `${config.model} will return a summary of its thinking (Claude never returns the raw reasoning).`
+        : `${config.model} only thinks when thinking is turned on in the request, which the harness doesn't do, so there may be nothing to show.`;
+  return `Thinking: shown, dimmed, as it arrives. ${what} The model may skip thinking on simple requests.`;
+}
+
 function stopNotice(result: AgentResult, config: Config): string | undefined {
   switch (result.stopReason) {
     case "max_turns":
       // The loop only stops here when the last response still had tool calls, so any text so far
       // was commentary along the way, not an answer.
       return `[stopped: reached MAX_TURNS (${config.maxTurns}) model calls while the model was still calling tools, before it gave an answer. ` +
-        "Send another message to let it continue, or ask it to summarise what it found]";
+        "Send another message to let it continue, ask it to summarise what it found, or raise the limit with /turns <n>]";
     case "max_tokens":
       return `[stopped: the response hit MAX_TOKENS (${config.maxTokens}) and was cut off]`;
     case "refusal":
@@ -156,8 +168,25 @@ async function main(): Promise<void> {
   const endLine = () => {
     if (!atLineStart) write("\n");
   };
+  // Thinking prints dimmed, after a "✻", with continuation lines indented to match.
+  let inThinking = false;
+  const showThinking = (text: string) => {
+    spinner.stop();
+    if (!inThinking) {
+      endLine();
+      write(dim("✻ "));
+      inThinking = true;
+    }
+    write(dim(text.replace(/\n/g, "\n  ")));
+  };
+  const endThinking = () => {
+    if (!inThinking) return;
+    inThinking = false;
+    endLine();
+  };
   const say = (line: string) => {
     spinner.stop();
+    endThinking();
     endLine();
     write(`${line}\n`);
   };
@@ -165,6 +194,7 @@ async function main(): Promise<void> {
   const clientHooks: ClientHooks = {
     onRequest: (body) => {
       transcript.log("request", body);
+      endThinking();
       endLine();
       spinner.start();
     },
@@ -177,8 +207,10 @@ async function main(): Promise<void> {
     },
     onTextDelta: (text) => {
       spinner.stop();
+      endThinking();
       write(text);
     },
+    onThinkingDelta: showThinking,
   };
   // Replaced when /provider or /model changes the settings.
   let model = createAnthropicClient(config, clientHooks);
@@ -186,6 +218,16 @@ async function main(): Promise<void> {
     onResponse: (res) => {
       spinner.stop();
       transcript.log("response", res);
+      // Streaming already printed thinking as it arrived; otherwise print it now, before any tool calls.
+      if (config.showThinking && !config.stream) {
+        for (const block of res.content) {
+          if (block.type === "thinking" && typeof block.thinking === "string" && block.thinking.trim()) {
+            showThinking(block.thinking.trim());
+            endThinking();
+          }
+        }
+      }
+      endThinking();
     },
     onToolCall: (call) => {
       transcript.log("tool_call", { id: call.id, name: call.name, input: call.input });
@@ -251,7 +293,7 @@ async function main(): Promise<void> {
   });
 
   console.log(
-    `harness · ${config.provider} / ${config.model} · ${registry.definitions().length} tool(s) · ${config.stream ? "streaming" : "non-streaming"} · /exit /reset /history /policy /provider /model`,
+    `harness · ${config.provider} / ${config.model} · ${registry.definitions().length} tool(s) · ${config.stream ? "streaming" : "non-streaming"} · /exit /reset /history /policy /provider /model /thinking /turns`,
   );
   console.log(`transcript: ${transcript.path}`);
   console.log(
@@ -338,6 +380,33 @@ async function main(): Promise<void> {
           ...(result.thinkingRemoved ? { thinkingRemoved: result.thinkingRemoved } : {}),
         });
       }
+      prompt();
+      continue;
+    }
+    const turnsCmd = /^\/turns(?:\s+(.*))?$/.exec(input);
+    if (turnsCmd) {
+      const result = runTurnsCommand(turnsCmd[1] ?? "", config.maxTurns);
+      if (result.maxTurns !== undefined) {
+        config = { ...config, maxTurns: result.maxTurns };
+        transcript.log("session", { maxTurns: config.maxTurns });
+      }
+      console.log(result.output);
+      prompt();
+      continue;
+    }
+    const thinkingCmd = /^\/thinking(?:\s+(.*))?$/.exec(input);
+    if (thinkingCmd) {
+      const arg = (thinkingCmd[1] ?? "").trim().toLowerCase();
+      if (arg === "on" || arg === "off") {
+        config = { ...config, showThinking: arg === "on" };
+        model = createAnthropicClient(config, clientHooks);
+        transcript.log("session", { showThinking: config.showThinking });
+      } else if (arg !== "") {
+        console.log("Usage: /thinking [on|off]");
+        prompt();
+        continue;
+      }
+      console.log(describeThinking(config));
       prompt();
       continue;
     }

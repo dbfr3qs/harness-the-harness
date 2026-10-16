@@ -134,6 +134,18 @@ test("a real captured DeepSeek stream (thinking, then a tool call with empty inp
   assert.deepEqual(deltas, [], "thinking is not printed as text");
 });
 
+test("readable thinking streams to onThinkingDelta only when showThinking is on", async () => {
+  const raw = await readFile(new URL("./fixtures/deepseek-tool-use.sse", import.meta.url), "utf8");
+  const ds: ClientConfig = { ...config, provider: "deepseek", model: "deepseek-flash" };
+  for (const showThinking of [true, false]) {
+    const thinking: string[] = [];
+    const { model } = client([sseResponse(raw)], { onThinkingDelta: (t) => thinking.push(t) }, { ...ds, showThinking });
+    const res = await model(req);
+    assert.equal(thinking.join(""), showThinking ? "The user wants the current time. Call get_time." : "");
+    assert.equal(res.content[0]!.type, "thinking", "kept in the message either way");
+  }
+});
+
 test("thinking, signature and citations are rebuilt; thinking is not shown as text", async () => {
   const deltas: string[] = [];
   const stream = sse(

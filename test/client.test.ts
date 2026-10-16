@@ -101,6 +101,25 @@ test("DeepSeek: same request shape under its base URL; errors name DeepSeek and 
   });
 });
 
+test("with showThinking, Claude 5 models are asked for summarized thinking; nothing else changes", async () => {
+  const body = async (cfg: Partial<ClientConfig>) => {
+    const c = client([json(200, okBody)], [], { ...config, ...cfg });
+    await c.model(req);
+    return JSON.parse(String(c.calls[0]!.init.body)) as Record<string, unknown>;
+  };
+  const summarized = { type: "adaptive", display: "summarized" };
+  for (const model of ["claude-haiku-5-5", "claude-sonnet-5-5", "claude-opus-5", "claude-fable-5-1"]) {
+    assert.deepEqual((await body({ model, showThinking: true })).thinking, summarized, model);
+    assert.equal((await body({ model, showThinking: false })).thinking, undefined, model);
+  }
+  // Older Claude models only think when thinking is turned on, which would change cost: left alone.
+  for (const model of ["claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5-20251001", "claude-test"]) {
+    assert.equal((await body({ model, showThinking: true })).thinking, undefined, model);
+  }
+  // DeepSeek already returns its thinking.
+  assert.equal((await body({ provider: "deepseek", model: "deepseek-flash", showThinking: true })).thinking, undefined);
+});
+
 test("400 throws immediately with error.type and error.message, no retry", async () => {
   const { model, calls } = client([
     json(400, { type: "error", error: { type: "invalid_request_error", message: "messages: bad shape" } }),

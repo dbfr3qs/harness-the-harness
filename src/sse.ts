@@ -66,9 +66,12 @@ export class StreamProtocolError extends Error {}
 
 type Block = { type: string; [key: string]: unknown };
 
+/** A piece of visible output from a stream: answer text, or (readable) thinking. */
+export type StreamedText = { kind: "text" | "thinking"; text: string };
+
 /**
  * Rebuilds the message the non-streaming API would have returned from stream events.
- * `apply` returns the text of a `text_delta` so the caller can show it as it arrives.
+ * `apply` returns the text of a text or thinking delta so the caller can show it as it arrives.
  */
 export function createMessageAccumulator() {
   let message: Record<string, unknown> | undefined;
@@ -99,7 +102,7 @@ export function createMessageAccumulator() {
     }
   }
 
-  function apply(ev: Record<string, any>): string | undefined {
+  function apply(ev: Record<string, any>): StreamedText | undefined {
     switch (ev.type) {
       case "message_start":
         message = { ...ev.message };
@@ -117,13 +120,13 @@ export function createMessageAccumulator() {
         switch (delta.type) {
           case "text_delta":
             block.text = String(block.text ?? "") + delta.text;
-            return block.type === "text" ? delta.text : undefined;
+            return block.type === "text" && delta.text ? { kind: "text", text: delta.text } : undefined;
           case "input_json_delta":
             partialJson.set(ev.index, (partialJson.get(ev.index) ?? "") + delta.partial_json);
             return undefined;
           case "thinking_delta":
             block.thinking = String(block.thinking ?? "") + delta.thinking;
-            return undefined;
+            return delta.thinking ? { kind: "thinking", text: delta.thinking } : undefined;
           case "signature_delta":
             block.signature = delta.signature;
             return undefined;
