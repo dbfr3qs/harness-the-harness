@@ -97,6 +97,14 @@ function validateInput(tool: Tool, input: unknown): string | undefined {
     return `the input for "${tool.name}" was not valid JSON (it may have been cut off): ${raw}. Call "${tool.name}" again with a complete JSON object.`;
   }
 
+  // Rejected rather than ignored: a model that passes an argument the tool doesn't have
+  // (an "offset" to read_file, say) would otherwise be misled by a result that ignored it.
+  const unknown = Object.keys(input).filter((key) => !Object.hasOwn(props, key));
+  if (unknown.length > 0) {
+    const valid = Object.keys(props).join(", ") || "none";
+    return `unknown key(s) for "${tool.name}": ${unknown.join(", ")}. "${tool.name}" takes only: ${valid}. Call it again without ${unknown.length > 1 ? "them" : "it"}.`;
+  }
+
   const missing = (schema.required ?? []).filter((key) => input[key] === undefined);
   if (missing.length > 0) {
     return `missing required key(s) for "${tool.name}": ${missing.join(", ")}. Call it again with ${missing.length > 1 ? "these keys" : "this key"} set.`;

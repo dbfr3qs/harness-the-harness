@@ -118,3 +118,57 @@ test("names that merely contain 'env' are still readable", async () => {
     assert.deepEqual(await registry.dispatch("read_file", { path }), { content: "fine", isError: false });
   }
 });
+
+// --- private paths ----------------------------------------------------------
+
+test(".git and the transcript directory can't be read or listed, however the path is spelled", async () => {
+  const ws = await realpath(await mkdtemp(join(tmpdir(), "harness-private-")));
+  try {
+    await mkdir(join(ws, ".git"));
+    await writeFile(join(ws, ".git", "config"), "[user]\n\temail = someone@example.test\n");
+    await mkdir(join(ws, "vendor", "lib", ".git"), { recursive: true });
+    await writeFile(join(ws, "vendor", "lib", ".git", "HEAD"), "ref");
+    await mkdir(join(ws, "logs"));
+    await writeFile(join(ws, "logs", "old.jsonl"), '{"kind":"request","data":"PAST CONVERSATION"}');
+    await mkdir(join(ws, "src"));
+    await writeFile(join(ws, "src", "ok.ts"), "fine");
+    await symlink(join(ws, "logs"), join(ws, "shortcut"));
+    await symlink(join(ws, ".git", "config"), join(ws, "gitconfig"));
+
+    const privatePaths = [{ path: "logs", name: "logs/", holds: "conversation transcripts" }];
+    const reg = createRegistry([createListDirTool(ws, privatePaths), createReadFileTool(ws, privatePaths)]);
+
+    for (const path of [".git/config", "./.git/config", ".GIT/config", "src/../.git/config", join(ws, ".git", "config"), "gitconfig", "vendor/lib/.git/HEAD"]) {
+      const out = await reg.dispatch("read_file", { path });
+      assert.equal(out.isError, true, path);
+      assert.match(out.content, /\.git\/, which holds the repository's internal data\. The harness keeps it private/i, path);
+      assert.ok(!out.content.includes("someone@"), path);
+    }
+    for (const path of ["logs/old.jsonl", "shortcut/old.jsonl", "src/../logs/old.jsonl"]) {
+      const out = await reg.dispatch("read_file", { path });
+      assert.match(out.content, /^Error: ".*" is in logs\/, which holds conversation transcripts\. The harness keeps it private, so read_file will not read it/, path);
+      assert.ok(!out.content.includes("PAST CONVERSATION"), path);
+    }
+    for (const path of [".git", "logs", "shortcut", "vendor/lib/.git"]) {
+      const out = await reg.dispatch("list_dir", { path });
+      assert.match(out.content, /^Error: .* The harness keeps it private, so list_dir will not list it/, path);
+    }
+
+    // Listings leave private entries out and say so; everything else is unaffected.
+    assert.deepEqual(await reg.dispatch("list_dir", {}), {
+      content: "src/\nvendor/\n[not listed: .git/, gitconfig, logs/, shortcut (kept private by the harness)]",
+      isError: false,
+    });
+    assert.equal((await reg.dispatch("list_dir", { path: "vendor/lib" })).content, "(empty directory)\n[not listed: .git/ (kept private by the harness)]");
+    assert.deepEqual(await reg.dispatch("read_file", { path: "src/ok.ts" }), { content: "fine", isError: false });
+  } finally {
+    await rm(ws, { recursive: true, force: true });
+  }
+});
+
+test("names that only resemble .git are readable", async () => {
+  await writeFile(join(root, ".gitignore"), "node_modules/\n");
+  await writeFile(join(root, "my.git"), "fine");
+  assert.equal((await registry.dispatch("read_file", { path: ".gitignore" })).isError, false);
+  assert.equal((await registry.dispatch("read_file", { path: "my.git" })).isError, false);
+});

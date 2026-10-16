@@ -85,6 +85,27 @@ for (const [key, value, pattern] of [
   });
 }
 
+test("unknown keys are rejected, naming the valid ones, and the handler doesn't run", async () => {
+  let ran = false;
+  const reader = defineTool({
+    name: "reader",
+    description: "Reads.",
+    input_schema: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+    handler: async () => {
+      ran = true;
+      return "contents";
+    },
+  });
+  const out = await createRegistry([reader]).dispatch("reader", { path: "a.txt", offset: 250 });
+  assert.deepEqual(out, {
+    content: 'Error: unknown key(s) for "reader": offset. "reader" takes only: path. Call it again without it.',
+    isError: true,
+  });
+  assert.equal(ran, false);
+  const none = await registry.dispatch("boom", { x: 1, y: 2 });
+  assert.match(none.content, /unknown key\(s\) for "boom": x, y\. "boom" takes only: none\. Call it again without them\./);
+});
+
 test("handler exception becomes an error result", async () => {
   const out = await registry.dispatch("boom", {});
   assert.deepEqual(out, { content: "Error: disk on fire; try again later", isError: true });

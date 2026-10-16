@@ -26,7 +26,7 @@ A zero-dependency TypeScript CLI that chats with a model through the Anthropic M
 
 ```sh
 npm start                 # interactive REPL
-npm start -- --verbose    # also print each tool call, its input and a one-line result preview
+npm start -- --verbose    # print each tool call's full input and a one-line preview of every result
 npm run check             # type-check (tsc --noEmit)
 npm test                  # unit tests (node --test), no network or API key needed
 ```
@@ -48,7 +48,9 @@ Press Tab to complete commands and their arguments (provider names, the current 
 
 Responses stream by default: text appears as the model writes it, and an animated row of dots (one to five and back) shows while it's waiting for the first output of each model call. The dots only appear when output is a terminal. Set `STREAM=0` to use plain non-streaming requests.
 
-After each answer the REPL prints that exchange's input and output token totals and the number of model calls. If the loop stops early, it says why: `MAX_TURNS` reached, `MAX_TOKENS` cut-off, or a refusal. After `MAX_TURNS`, send another message and the model continues where it left off.
+Each tool call is shown as a dim line as it runs (`→ read_file src/agent.ts`), with a `✗` line under it if the tool returned an error, so a long run of tool calls is never a silent wait. The model's thinking is not shown.
+
+After each answer the REPL prints that exchange's token totals, the number of model calls and the number of tool calls, e.g. `[tokens: 9413 in + 42240 cached, 5951 out · 8 model call(s) · 19 tool call(s)]`. "Cached" is input the provider served from its prompt cache (DeepSeek caches automatically); it is still input the model read, just billed at a lower rate. If the loop stops early, it says why: `MAX_TURNS` reached while the model was still calling tools, `MAX_TOKENS` cut-off, or a refusal. After `MAX_TURNS`, send another message and the model continues where it left off.
 
 ## Providers
 
@@ -78,7 +80,7 @@ Things to know about DeepSeek:
 - **It thinks by default.** Responses start with a `thinking` block, which is kept in history and sent back verbatim like Claude's. It is not printed.
 - **`is_error` on tool results is ignored**, so the harness's tool errors always begin with `Error:` in the text itself.
 - **Data goes to DeepSeek.** Your messages, and anything the tools return (workspace file contents, fetched pages), are sent to DeepSeek's servers under DeepSeek's terms.
-- Token counts may look lower than Claude's for the same conversation: DeepSeek reports cached input separately in `cache_read_input_tokens`, which the REPL's total doesn't include.
+- DeepSeek caches repeated input automatically, so most of a long tool loop's input shows up as `cached` in the token line.
 
 ## Environment variables
 
@@ -110,6 +112,13 @@ Things to know about DeepSeek:
 | `web_fetch`| `url` (required), `offset` | Readable text of a web page (HTML converted to text, links kept as absolute URLs), in parts of up to `MAX_TOOL_OUTPUT_CHARS` minus 500 |
 
 All tools are read-only. `web_fetch` is the only one that reaches the network. File tools only see paths inside `WORKSPACE_ROOT`: `..` traversal, absolute paths elsewhere, and symlinks that escape are refused. `read_file` never reads `.env` or `.env.*` files, in any directory, whatever the case, or through a symlink, because they hold secrets such as the API key. `list_dir` still shows that they exist.
+
+Two directories are private: neither tool reads or lists anything inside them, by any path or symlink, and `list_dir` leaves them out of listings with a note saying so.
+
+- **`.git/`** (at any depth): the repository's internals, including your name and email in `.git/config`.
+- **The transcript directory** (`transcripts/` by default; wherever `TRANSCRIPT_PATH` points). Transcripts hold whole past conversations, and without this a model could read conversations held with another provider. If `TRANSCRIPT_PATH` puts transcripts directly in the workspace root, only the current transcript file is private.
+
+Tools reject arguments they don't define (for example an `offset` passed to `read_file`) instead of ignoring them, so the model isn't misled by a result that silently ignored part of its request.
 
 ### web_fetch safeguards
 
@@ -252,7 +261,7 @@ src/
   menu.ts         arrow-key menu for the terminal
   complete.ts     Tab completion for slash commands
   model_command.ts /provider and /model
-  tools/          workspace sandboxing, get_time, list_dir, read_file, web_fetch, web_policy
+  tools/          workspace sandboxing, private paths, get_time, list_dir, read_file, web_fetch, web_policy
 test/             unit tests (fake model, fake fetch, temp dirs)
 ```
 

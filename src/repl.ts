@@ -1,3 +1,4 @@
+import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { runAgent } from "./agent.ts";
 import type { AgentResult } from "./agent.ts";
@@ -16,17 +17,28 @@ import { createRegistry } from "./registry.ts";
 import { createSpinner } from "./spinner.ts";
 import { getTimeTool } from "./tools/get_time.ts";
 import { createListDirTool } from "./tools/list_dir.ts";
+import type { PrivatePath } from "./tools/private_paths.ts";
 import { createReadFileTool } from "./tools/read_file.ts";
 import { createWebFetchTool } from "./tools/web_fetch.ts";
 import { loadWebPolicy } from "./tools/web_policy.ts";
 import type { CompiledPolicy } from "./tools/web_policy.ts";
 import type { AgentHooks } from "./agent.ts";
-import type { Message } from "./types.ts";
+import type { Message, ToolUseBlock } from "./types.ts";
 
 const SYSTEM_PROMPT =
   "You are a helpful assistant running in a command-line harness. Answer concisely and accurately.";
 
 const verbose = process.argv.includes("--verbose");
+const dim = (s: string) => (process.stdout.isTTY ? `\x1b[2m${s}\x1b[0m` : s);
+
+// "read_file .git/config", "web_fetch https://x.test offset=8000": the call at a glance.
+function describeCall(call: ToolUseBlock): string {
+  const input = call.input && typeof call.input === "object" ? (call.input as Record<string, unknown>) : {};
+  const parts = Object.entries(input).map(([key, value]) =>
+    (key === "path" || key === "url") && typeof value === "string" ? value : `${key}=${JSON.stringify(value)}`,
+  );
+  return oneLine([call.name, ...parts].join(" "), 100);
+}
 
 function oneLine(s: string, max = 120): string {
   const flat = s.replace(/\s+/g, " ").trim();
@@ -42,10 +54,21 @@ function describeHistory(messages: Message[]): string {
   return `${messages.length} message(s):\n${lines.join("\n")}`;
 }
 
+// Cached input is reported separately by the API; it still counts as input the model read.
+function usageLine(result: AgentResult): string {
+  const u = result.usage;
+  const cached = u.cache_read_input_tokens ? ` + ${u.cache_read_input_tokens} cached` : "";
+  const tools = result.toolCalls ? ` · ${result.toolCalls} tool call(s)` : "";
+  return `[tokens: ${u.input_tokens + u.cache_creation_input_tokens} in${cached}, ${u.output_tokens} out · ${result.turns} model call(s)${tools}]`;
+}
+
 function stopNotice(result: AgentResult, config: Config): string | undefined {
   switch (result.stopReason) {
     case "max_turns":
-      return `[stopped: reached MAX_TURNS (${config.maxTurns}) model calls; send another message to let it continue]`;
+      // The loop only stops here when the last response still had tool calls, so any text so far
+      // was commentary along the way, not an answer.
+      return `[stopped: reached MAX_TURNS (${config.maxTurns}) model calls while the model was still calling tools, before it gave an answer. ` +
+        "Send another message to let it continue, or ask it to summarise what it found]";
     case "max_tokens":
       return `[stopped: the response hit MAX_TOKENS (${config.maxTokens}) and was cut off]`;
     case "refusal":
@@ -71,6 +94,18 @@ function addUserText(messages: Message[], text: string): () => void {
   return () => {
     messages.pop();
   };
+}
+
+// Transcripts hold whole past conversations, so the model's file tools must not read them:
+// otherwise one provider could be handed conversations held with another. If transcripts are
+// written straight into the workspace root, only the current file can be singled out.
+function transcriptPrivatePaths(config: Config): PrivatePath[] {
+  const file = resolve(config.transcriptPath);
+  const dir = dirname(file);
+  const holds = "conversation transcripts";
+  if (dir === resolve(config.workspaceRoot)) return [{ path: file, name: basename(file), holds }];
+  const rel = relative(resolve(config.workspaceRoot), dir);
+  return [{ path: dir, name: rel && !rel.startsWith("..") && !isAbsolute(rel) ? `${rel}/` : `${dir}/`, holds }];
 }
 
 async function main(): Promise<void> {
@@ -154,11 +189,13 @@ async function main(): Promise<void> {
     },
     onToolCall: (call) => {
       transcript.log("tool_call", { id: call.id, name: call.name, input: call.input });
-      if (verbose) say(`  → ${call.name} ${JSON.stringify(call.input)}`);
+      // Always shown, so a run of tool calls with no text in between isn't just a silent wait.
+      say(verbose ? `  → ${call.name} ${JSON.stringify(call.input)}` : dim(`  → ${describeCall(call)}`));
     },
     onToolResult: (call, outcome) => {
       transcript.log("tool_result", { tool_use_id: call.id, name: call.name, ...outcome });
       if (verbose) say(`  ← ${outcome.isError ? "error" : "ok"}: ${oneLine(outcome.content)}`);
+      else if (outcome.isError) say(dim(`    ✗ ${oneLine(outcome.content.replace(/^Error:\s*/, ""), 100)}`));
     },
   };
   // web_fetch asks before every fetch, because a fetched URL can carry workspace data out.
@@ -193,10 +230,11 @@ async function main(): Promise<void> {
     onDecision: ({ url, stage, decision }) =>
       transcript.log("tool_call", { web_policy: { url, stage, action: decision.action, rule: decision.rule?.match ?? "default" } }),
   });
+  const privatePaths = transcriptPrivatePaths(config);
   const registry = createRegistry([
     getTimeTool,
-    createListDirTool(config.workspaceRoot),
-    createReadFileTool(config.workspaceRoot),
+    createListDirTool(config.workspaceRoot, privatePaths),
+    createReadFileTool(config.workspaceRoot, privatePaths),
     webFetch,
   ]);
   const messages: Message[] = [];
@@ -344,7 +382,7 @@ async function main(): Promise<void> {
       if (!config.stream && result.finalText) say(result.finalText);
       const notice = stopNotice(result, config);
       if (notice) say(notice);
-      say(`[tokens: ${result.usage.input_tokens} in, ${result.usage.output_tokens} out · ${result.turns} model call(s)]`);
+      say(usageLine(result));
     } catch (err) {
       // Nothing from the model landed, so take back the user's text and keep history valid.
       if (messages.length === lengthAfterInput) {

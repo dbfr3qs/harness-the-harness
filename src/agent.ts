@@ -14,7 +14,15 @@ export interface AgentResult {
   finalText: string; // text blocks of the last assistant message, joined
   turns: number;
   stopReason: AgentStopReason;
-  usage: { input_tokens: number; output_tokens: number }; // summed across turns
+  usage: Usage; // summed across turns
+  toolCalls: number; // tool calls run, summed across turns
+}
+
+export interface Usage {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_input_tokens: number; // cached input, billed and counted separately from input_tokens
+  cache_creation_input_tokens: number;
 }
 
 const CUT_OFF_MESSAGE =
@@ -32,14 +40,16 @@ export async function runAgent(opts: {
 }): Promise<AgentResult> {
   const { model, registry, system, messages, maxTurns, maxToolOutputChars, hooks = {} } = opts;
   const tools = registry.definitions();
-  const usage = { input_tokens: 0, output_tokens: 0 };
+  const usage: Usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
   let turns = 0;
+  let toolCalls = 0;
 
   const finish = (stopReason: AgentStopReason): AgentResult => ({
     finalText: lastAssistantText(messages),
     turns,
     stopReason,
     usage,
+    toolCalls,
   });
 
   while (turns < maxTurns) {
@@ -48,6 +58,8 @@ export async function runAgent(opts: {
     hooks.onResponse?.(res);
     usage.input_tokens += res.usage?.input_tokens ?? 0;
     usage.output_tokens += res.usage?.output_tokens ?? 0;
+    usage.cache_read_input_tokens += res.usage?.cache_read_input_tokens ?? 0;
+    usage.cache_creation_input_tokens += res.usage?.cache_creation_input_tokens ?? 0;
 
     // Verbatim: never edit, filter or reorder the assistant's content blocks.
     messages.push({ role: "assistant", content: res.content });
@@ -62,6 +74,7 @@ export async function runAgent(opts: {
     const cutOff = res.stop_reason === "max_tokens";
     const results: ToolResultBlock[] = [];
     for (const call of calls) {
+      toolCalls++;
       hooks.onToolCall?.(call);
       const outcome: ToolOutcome = cutOff
         ? { content: CUT_OFF_MESSAGE, isError: true }

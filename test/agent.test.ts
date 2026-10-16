@@ -43,7 +43,7 @@ const text = (t: string) => ({ type: "text" as const, text: t });
 function reply(
   content: AssistantBlock[],
   stop_reason: StopReason = content.some((b) => b.type === "tool_use") ? "tool_use" : "end_turn",
-  usage = { input_tokens: 10, output_tokens: 5 },
+  usage: MessageResponse["usage"] = { input_tokens: 10, output_tokens: 5 },
 ): MessageResponse {
   return { id: `msg_${++idCounter}`, model: "fake", role: "assistant", content, stop_reason, usage };
 }
@@ -160,12 +160,18 @@ test("7. unknown block types are sent back unchanged in the next request", async
 test("8. usage is summed across turns", async () => {
   const { model } = fakeModel([
     reply([toolUse("echo", { text: "a" })], "tool_use", { input_tokens: 100, output_tokens: 20 }),
-    reply([toolUse("echo", { text: "b" })], "tool_use", { input_tokens: 150, output_tokens: 30 }),
-    reply([text("done")], "end_turn", { input_tokens: 200, output_tokens: 40 }),
+    reply([toolUse("echo", { text: "b" }), toolUse("echo", { text: "c" })], "tool_use", {
+      input_tokens: 150,
+      output_tokens: 30,
+      cache_read_input_tokens: 1000,
+      cache_creation_input_tokens: null,
+    }),
+    reply([text("done")], "end_turn", { input_tokens: 200, output_tokens: 40, cache_read_input_tokens: 1200, cache_creation_input_tokens: 7 }),
   ]);
   const out = await run(model, [user("go")]);
-  assert.deepEqual(out.usage, { input_tokens: 450, output_tokens: 90 });
+  assert.deepEqual(out.usage, { input_tokens: 450, output_tokens: 90, cache_read_input_tokens: 2200, cache_creation_input_tokens: 7 });
   assert.equal(out.turns, 3);
+  assert.equal(out.toolCalls, 3);
 });
 
 // --- additional stop-condition and hook coverage ---------------------------

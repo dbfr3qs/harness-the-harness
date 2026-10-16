@@ -48,7 +48,13 @@ export interface MessageResponse {
   role: "assistant";
   content: AssistantBlock[];
   stop_reason: StopReason | null;
-  usage: { input_tokens: number; output_tokens: number };
+  usage: {
+    input_tokens: number;
+    output_tokens: number;
+    // Input served from or written to the provider's prompt cache; not included in input_tokens.
+    cache_read_input_tokens?: number | null;
+    cache_creation_input_tokens?: number | null;
+  };
 }
 
 export interface ModelRequest {
