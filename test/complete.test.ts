@@ -6,7 +6,7 @@ const state = { models: ["deepseek-flash", "deepseek-v4-pro"], policyPatterns: [
 const complete = (line: string) => completeSlashCommand(line, state);
 
 test("command names complete from / and from a prefix, with a trailing space", () => {
-  assert.deepEqual(complete("/"), [["/exit ", "/reset ", "/history ", "/policy ", "/provider ", "/model ", "/thinking ", "/turns "], "/"]);
+  assert.deepEqual(complete("/"), [["/exit ", "/reset ", "/history ", "/policy ", "/provider ", "/model ", "/thinking ", "/turns ", "/defaults "], "/"]);
   assert.deepEqual(complete("/p"), [["/policy ", "/provider "], "/p"]);
   assert.deepEqual(complete("/pr"), [["/provider "], "/pr"]);
   assert.deepEqual(complete("/nope"), [[], "/nope"]);

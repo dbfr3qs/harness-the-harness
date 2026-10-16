@@ -34,7 +34,7 @@ export function createReadFileTool(root: string, privatePaths: PrivatePath[] = [
       // Check the path as given and the real path, so a symlink to .env is refused too.
       if (isEnvFile(resolve(root, p))) throw new Error(envRefusal);
       const privateRefusal = (why: string) =>
-        new Error(`"${p}" is in ${why}. The harness keeps it private, so read_file will not read it. Do not try other paths to it.`);
+        new Error(`"${p}" is off limits: ${why}. The harness keeps it private, so read_file will not read it. Do not try other paths to it.`);
       const givenWhy = await privacy.reason(resolve(root, p));
       if (givenWhy) throw privateRefusal(givenWhy);
       const file = await resolveInWorkspace(root, p);

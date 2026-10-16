@@ -146,9 +146,13 @@ test(".git and the transcript directory can't be read or listed, however the pat
     }
     for (const path of ["logs/old.jsonl", "shortcut/old.jsonl", "src/../logs/old.jsonl"]) {
       const out = await reg.dispatch("read_file", { path });
-      assert.match(out.content, /^Error: ".*" is in logs\/, which holds conversation transcripts\. The harness keeps it private, so read_file will not read it/, path);
+      assert.match(out.content, /^Error: ".*" is off limits: it is in logs\/, which holds conversation transcripts\. The harness keeps it private, so read_file will not read it/, path);
       assert.ok(!out.content.includes("PAST CONVERSATION"), path);
     }
+    // A private file (not a directory) is named as itself.
+    const settingsReg = createRegistry([createReadFileTool(ws, [{ path: "src/ok.ts", name: "src/ok.ts", holds: "test settings" }])]);
+    assert.match((await settingsReg.dispatch("read_file", { path: "src/ok.ts" })).content, /^Error: "src\/ok\.ts" is off limits: src\/ok\.ts holds test settings\. The harness keeps it private/);
+
     for (const path of [".git", "logs", "shortcut", "vendor/lib/.git"]) {
       const out = await reg.dispatch("list_dir", { path });
       assert.match(out.content, /^Error: .* The harness keeps it private, so list_dir will not list it/, path);

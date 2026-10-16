@@ -25,7 +25,7 @@ export function createListDirTool(root: string, privatePaths: PrivatePath[] = []
     handler: async (input) => {
       const p = typeof input.path === "string" && input.path !== "" ? input.path : ".";
       const privateRefusal = (why: string) =>
-        new Error(`"${p}" is in ${why}. The harness keeps it private, so list_dir will not list it. Do not try other paths to it.`);
+        new Error(`"${p}" is off limits: ${why}. The harness keeps it private, so list_dir will not list it. Do not try other paths to it.`);
       const givenWhy = await privacy.reason(resolve(root, p));
       if (givenWhy) throw privateRefusal(givenWhy);
       const dir = await resolveInWorkspace(root, p);

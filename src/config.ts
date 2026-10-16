@@ -1,4 +1,5 @@
 import { join } from "node:path";
+import type { Settings } from "./settings.ts";
 
 export type Provider = "anthropic" | "deepseek";
 
@@ -73,11 +74,12 @@ function positiveInt(env: NodeJS.ProcessEnv, name: string, fallback: number, min
 }
 
 // A whole number of 1 or more, or "unlimited" ("off" also works) for no limit.
-function maxTurns(env: NodeJS.ProcessEnv): number {
+function maxTurns(env: NodeJS.ProcessEnv, fallback: number): number {
   const raw = env.MAX_TURNS?.trim().toLowerCase();
   if (raw === "unlimited" || raw === "off") return Infinity;
+  if (raw === undefined || raw === "") return fallback;
   try {
-    return positiveInt(env, "MAX_TURNS", 10);
+    return positiveInt(env, "MAX_TURNS", fallback);
   } catch {
     throw new ConfigError(`MAX_TURNS must be an integer >= 1 or "unlimited" (got "${env.MAX_TURNS}")`);
   }
@@ -114,11 +116,17 @@ export function checkModel(provider: Provider, model: string): void {
 }
 
 /**
- * Key, base URL and model for `provider`. MODEL and BASE_URL belong to the provider named by
- * PROVIDER, so switching away and back restores them; the ANTHROPIC_ names belong to anthropic.
+ * Key, base URL and model for `provider`. MODEL and BASE_URL belong to the starting provider, so
+ * switching away and back restores them; the ANTHROPIC_ names belong to anthropic. Environment
+ * variables win over saved settings (harness.json), which win over the built-in defaults.
  * Used at startup and by /provider and /model.
  */
-export function providerSettings(env: NodeJS.ProcessEnv, provider: Provider, model?: string): ProviderSettings {
+export function providerSettings(
+  env: NodeJS.ProcessEnv,
+  provider: Provider,
+  model?: string,
+  settings: Settings = {},
+): ProviderSettings {
   const info = PROVIDERS[provider];
   const apiKey = env[info.keyVar]?.trim();
   if (!apiKey) {
@@ -126,10 +134,20 @@ export function providerSettings(env: NodeJS.ProcessEnv, provider: Provider, mod
       `${info.keyVar} is not set (PROVIDER=${provider}). Add it to .env in the project root or export it in your shell.`,
     );
   }
-  const own = (name: string) => (provider === envProvider(env) ? env[name] : undefined);
+  const own = (name: string) => (provider === startProvider(env, settings) ? env[name] : undefined);
   const legacy = (name: string) => (provider === "anthropic" ? env[`ANTHROPIC_${name}`] : undefined);
-  const chosen = (model || own("MODEL") || legacy("MODEL") || info.defaultModel).trim();
-  checkModel(provider, chosen);
+  const chosen = (model || own("MODEL") || legacy("MODEL") || settings.models?.[provider] || info.defaultModel).trim();
+  try {
+    checkModel(provider, chosen);
+  } catch (err) {
+    // Say where the provider came from, when it wasn't PROVIDER: MODEL applies to the saved one.
+    if (err instanceof ConfigError && !env.PROVIDER?.trim() && settings.provider === provider) {
+      throw new ConfigError(
+        err.message.replace(`for PROVIDER=${provider}`, `for ${provider}, the default provider saved with /defaults (set PROVIDER to start with another)`),
+      );
+    }
+    throw err;
+  }
   return {
     provider,
     apiKey,
@@ -138,8 +156,9 @@ export function providerSettings(env: NodeJS.ProcessEnv, provider: Provider, mod
   };
 }
 
-function envProvider(env: NodeJS.ProcessEnv): Provider {
-  const name = env.PROVIDER?.trim().toLowerCase() || "anthropic";
+/** The provider to start with: PROVIDER, else the saved default, else anthropic. */
+export function startProvider(env: NodeJS.ProcessEnv, settings: Settings = {}): Provider {
+  const name = env.PROVIDER?.trim().toLowerCase() || settings.provider || "anthropic";
   if (!isProvider(name)) {
     throw new ConfigError(`PROVIDER must be one of ${PROVIDER_NAMES.join(", ")} (got "${env.PROVIDER}")`);
   }
@@ -152,8 +171,8 @@ export function hasKey(env: NodeJS.ProcessEnv, provider: Provider): boolean {
 }
 
 // Throws ConfigError on a missing key or invalid values; callers decide how to exit.
-export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
-  const settings = providerSettings(env, envProvider(env));
+export function loadConfig(env: NodeJS.ProcessEnv = process.env, saved: Settings = {}): Config {
+  const settings = providerSettings(env, startProvider(env, saved), undefined, saved);
   const secrets = Object.values(PROVIDERS)
     .map((p) => env[p.keyVar]?.trim())
     .filter((k): k is string => Boolean(k));
@@ -162,11 +181,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     ...settings,
     secrets,
     maxTokens: positiveInt(env, "MAX_TOKENS", 4096),
-    maxTurns: maxTurns(env),
+    maxTurns: maxTurns(env, saved.maxTurns ?? 10),
     timeoutMs: positiveInt(env, "TIMEOUT_MS", 120_000),
     maxRetries: positiveInt(env, "MAX_RETRIES", 3, 0),
     stream: bool(env, "STREAM", true),
-    showThinking: bool(env, "SHOW_THINKING", false),
+    showThinking: bool(env, "SHOW_THINKING", saved.showThinking ?? false),
     maxToolOutputChars: positiveInt(env, "MAX_TOOL_OUTPUT_CHARS", 8000),
     workspaceRoot: env.WORKSPACE_ROOT || process.cwd(),
     transcriptPath: env.TRANSCRIPT_PATH || join("transcripts", `${timestamp()}.jsonl`),

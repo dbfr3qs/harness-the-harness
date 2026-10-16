@@ -27,7 +27,7 @@ export function runTurnsCommand(args: string, current: number): TurnsCommandResu
   }
   if (n === current) return { output: `Max turns is already ${describeTurns(n)}.` };
   return {
-    output: `${now(n)} (was ${describeTurns(current)}). Lasts for this session; set MAX_TURNS in .env to change the default.`,
+    output: `${now(n)} (was ${describeTurns(current)}). Lasts for this session; /defaults save keeps it.`,
     maxTurns: n,
   };
 }

@@ -25,17 +25,21 @@ export function createPrivacyCheck(root: string, extra: PrivatePath[] = []) {
       extras: await Promise.all(extra.map(async (e) => ({ ...e, abs: await both(resolve(root, e.path)) }))),
     }))());
 
-  /** Why `absPath` is private, as text for the model, or undefined if it isn't. */
+  /**
+   * Why `absPath` is private, as a clause for the model ("it is in .git/, which holds ...",
+   * "harness.json holds ..."), or undefined if it isn't.
+   */
   async function reason(absPath: string): Promise<string | undefined> {
     const { roots, extras } = await load();
     for (const e of extras) {
-      if (e.abs.some((base) => within(base, absPath))) return `${e.name}, which holds ${e.holds}`;
+      if (e.abs.includes(absPath) && !e.name.endsWith("/")) return `${e.name} holds ${e.holds}`;
+      if (e.abs.some((base) => within(base, absPath))) return `it is in ${e.name}, which holds ${e.holds}`;
     }
     for (const r of roots) {
       if (!within(r, absPath)) continue;
       const parts = relative(r, absPath).split(sep);
       const git = parts.findIndex((part) => part.toLowerCase() === ".git");
-      if (git >= 0) return `${[...parts.slice(0, git + 1)].join("/")}/, which holds the repository's internal data`;
+      if (git >= 0) return `it is in ${[...parts.slice(0, git + 1)].join("/")}/, which holds the repository's internal data`;
     }
     return undefined;
   }

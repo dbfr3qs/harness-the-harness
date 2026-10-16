@@ -44,6 +44,7 @@ In the REPL:
 | `/provider` | Switch between Claude and DeepSeek from a menu; `/provider deepseek` switches directly (see [Providers](#providers)) |
 | `/model`   | Switch model within the current provider from a menu; `/model <id>` switches directly |
 | `/turns`   | Show the model-call limit per message; `/turns <n>` or `/turns unlimited` changes it for the session |
+| `/defaults` | Show what the harness starts with; `/defaults save` keeps this session's provider, models, thinking and turns, `/defaults clear` removes them (see [Saved defaults](#saved-defaults)) |
 | `/thinking` | Show or hide the model's thinking: `/thinking on`, `/thinking off` (see [Seeing the model's thinking](#seeing-the-models-thinking)) |
 
 Press Tab to complete commands and their arguments (provider names, the current provider's models, `/policy` subcommands and existing rule patterns); press it twice to list the options. A line that starts with an unknown `/word` is reported as an unknown command rather than sent to the model; paths such as `/etc/hosts` still go through.
@@ -86,7 +87,7 @@ The startup line shows which is in use (`harness · deepseek / deepseek-flash ·
 - **The conversation carries over.** Switching provider keeps the history, with one exception: thinking blocks are removed, because each provider only accepts thinking blocks it wrote (Claude rejects DeepSeek's with a 400). Switching model within a provider keeps everything.
 - **Each provider remembers its model** for the session, so switching away and back returns to the model you were using. `MODEL` and `BASE_URL` belong to the provider named by `PROVIDER`; the other provider uses its defaults.
 - **`/model` lists the usual models.** For Claude, `/model <id>` also accepts any other model ID (Anthropic reports unknown ones clearly); for DeepSeek only the listed models are accepted.
-- Switches last for the session only. To change the default, set `PROVIDER` and `MODEL` in `.env`.
+- Switches last for the session only. To start with them next time, run `/defaults save` (see [Saved defaults](#saved-defaults)).
 - Each switch is logged in the transcript as a `session` line with the provider, model and base URL.
 
 Things to know about DeepSeek:
@@ -109,6 +110,31 @@ What you see depends on the model:
 
 Models may skip thinking on simple requests, so not every answer has any.
 
+## Saved defaults
+
+The harness starts with the provider, model, thinking and turn settings saved in `harness.json` in the project root. Set things up the way you like during a session, then:
+
+```
+/defaults          show what the next start will use, and where each setting comes from
+/defaults save     save this session's provider, models, thinking and turns
+/defaults clear    delete harness.json; the built-in defaults apply again
+```
+
+```json
+{
+  "provider": "deepseek",
+  "models": { "anthropic": "claude-haiku-5-5", "deepseek": "deepseek-v4-pro" },
+  "showThinking": true,
+  "maxTurns": "unlimited"
+}
+```
+
+- **One model per provider** is saved: the one in use, plus the one you last used with the other provider this session (or the one already saved), so `/provider` switches to it as well.
+- **Environment variables win.** For each setting, the order is: environment variable (`PROVIDER`, `MODEL`, `SHOW_THINKING`, `MAX_TURNS`, from `.env` or your shell), then `harness.json`, then the built-in default. `/defaults` shows which one decides each setting, and `/defaults save` warns if an environment variable will still win over what you saved.
+- **No keys.** The file only holds the settings above; keys stay in `.env`. Anything else in it is an error at startup, as is an invalid value (such as a DeepSeek model that doesn't exist), so a typo can't silently change what runs.
+- **Private.** `harness.json` is gitignored, and the model's file tools can't read it.
+- Set `HARNESS_SETTINGS` to keep the file somewhere else.
+
 ## Environment variables
 
 | Variable                | Default                           | Purpose |
@@ -126,6 +152,7 @@ Models may skip thinking on simple requests, so not every answer has any.
 | `STREAM`                | `true`                            | Stream responses (SSE); `0`/`false` for non-streaming requests |
 | `SHOW_THINKING`         | `false`                           | Start with the model's thinking shown (same as `/thinking on`) |
 | `WEB_POLICY`            | `web-policy.json`                 | Site policy for `web_fetch` (see below). If set explicitly, the file must exist |
+| `HARNESS_SETTINGS`      | `harness.json`                    | Saved defaults file (see [Saved defaults](#saved-defaults)) |
 | `MAX_TOOL_OUTPUT_CHARS` | `8000`                            | Tool results longer than this are truncated with a visible marker |
 | `WORKSPACE_ROOT`        | current directory                 | Sandbox root for the file tools |
 | `TRANSCRIPT_PATH`       | `./transcripts/<timestamp>.jsonl` | JSONL transcript file |
@@ -141,10 +168,13 @@ Models may skip thinking on simple requests, so not every answer has any.
 
 All tools are read-only. `web_fetch` is the only one that reaches the network. File tools only see paths inside `WORKSPACE_ROOT`: `..` traversal, absolute paths elsewhere, and symlinks that escape are refused. `read_file` never reads `.env` or `.env.*` files, in any directory, whatever the case, or through a symlink, because they hold secrets such as the API key. `list_dir` still shows that they exist.
 
-Two directories are private: neither tool reads or lists anything inside them, by any path or symlink, and `list_dir` leaves them out of listings with a note saying so.
+Some paths are private: neither tool reads or lists them, by any path or symlink, and `list_dir` leaves them out of listings with a note saying so.
 
 - **`.git/`** (at any depth): the repository's internals, including your name and email in `.git/config`.
 - **The transcript directory** (`transcripts/` by default; wherever `TRANSCRIPT_PATH` points). Transcripts hold whole past conversations, and without this a model could read conversations held with another provider. If `TRANSCRIPT_PATH` puts transcripts directly in the workspace root, only the current transcript file is private.
+- **Settings files**: `harness.json` (wherever `HARNESS_SETTINGS` points) and the web policy file (`web-policy.json`, or wherever `WEB_POLICY` points). The tool description already tells the model what the policy allows.
+
+**The model can't change any file.** No tool writes, deletes or runs anything; the only code that writes is the transcript logger and `/defaults save`, `/defaults clear` and `/policy save`, which run only when you type them. Slash commands are recognised only in what you type, never in model output. `test/boundaries.test.ts` fails if anything under `src/tools/` gains a write or execute API, or imports the code that saves settings, so a tool like that can't be added by accident (the spec requires the owner's approval for one).
 
 Tools reject arguments they don't define (for example an `offset` passed to `read_file`) instead of ignoring them, so the model isn't misled by a result that silently ignored part of its request.
 
@@ -289,6 +319,9 @@ src/
   menu.ts         arrow-key menu for the terminal
   complete.ts     Tab completion for slash commands
   model_command.ts /provider and /model
+  settings.ts     harness.json: load, validate, save
+  defaults_command.ts /defaults
+  turns_command.ts /turns
   tools/          workspace sandboxing, private paths, get_time, list_dir, read_file, web_fetch, web_policy
 test/             unit tests (fake model, fake fetch, temp dirs)
 ```

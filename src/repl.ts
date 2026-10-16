@@ -14,6 +14,9 @@ import type { ModelCommandContext } from "./model_command.ts";
 import { createTranscriptLogger } from "./log.ts";
 import { createPolicyStore, runPolicyCommand } from "./policy_command.ts";
 import { createRegistry } from "./registry.ts";
+import { runDefaultsCommand } from "./defaults_command.ts";
+import { DEFAULT_SETTINGS_PATH, formatSettings, loadSettings } from "./settings.ts";
+import type { Settings } from "./settings.ts";
 import { createSpinner } from "./spinner.ts";
 import { describeTurns, runTurnsCommand } from "./turns_command.ts";
 import { getTimeTool } from "./tools/get_time.ts";
@@ -127,8 +130,12 @@ function transcriptPrivatePaths(config: Config): PrivatePath[] {
 
 async function main(): Promise<void> {
   let config: Config;
+  // Saved defaults (harness.json): environment variables still win over them.
+  const settingsPath = process.env.HARNESS_SETTINGS || DEFAULT_SETTINGS_PATH;
+  let savedSettings: Settings;
   try {
-    config = loadConfig();
+    savedSettings = await loadSettings(settingsPath);
+    config = loadConfig(process.env, savedSettings);
   } catch (err) {
     if (err instanceof ConfigError) {
       console.error(`Config error: ${err.message}`);
@@ -279,7 +286,13 @@ async function main(): Promise<void> {
     onDecision: ({ url, stage, decision }) =>
       transcript.log("tool_call", { web_policy: { url, stage, action: decision.action, rule: decision.rule?.match ?? "default" } }),
   });
-  const privatePaths = transcriptPrivatePaths(config);
+  // The model's file tools can't read these. No tool can write anything (test/boundaries.test.ts
+  // keeps it that way); settings files change only through /defaults and /policy, typed by the user.
+  const privatePaths: PrivatePath[] = [
+    ...transcriptPrivatePaths(config),
+    { path: resolve(settingsPath), name: settingsPath, holds: "the harness's saved settings" },
+    { path: resolve(config.webPolicyPath), name: config.webPolicyPath, holds: "the web_fetch site policy" },
+  ];
   const registry = createRegistry([
     getTimeTool,
     createListDirTool(config.workspaceRoot, privatePaths),
@@ -328,7 +341,7 @@ async function main(): Promise<void> {
   });
 
   console.log(
-    `harness · ${config.provider} / ${config.model} · ${registry.definitions().length} tool(s) · ${config.stream ? "streaming" : "non-streaming"} · /exit /reset /history /policy /provider /model /thinking /turns`,
+    `harness · ${config.provider} / ${config.model} · ${registry.definitions().length} tool(s) · ${config.stream ? "streaming" : "non-streaming"} · /exit /reset /history /policy /provider /model /thinking /turns /defaults`,
   );
   console.log(`transcript: ${transcript.path}`);
   console.log(
@@ -400,6 +413,7 @@ async function main(): Promise<void> {
         current: { provider: config.provider, apiKey: config.apiKey, baseUrl: config.baseUrl, model: config.model },
         messages,
         lastModel,
+        settings: savedSettings,
         ...(process.stdin.isTTY && process.stdout.isTTY
           ? { choose: (title, items, initial) => selectFromMenu(process.stdin, process.stdout, title, items, initial) }
           : {}),
@@ -418,6 +432,23 @@ async function main(): Promise<void> {
           ...(result.thinkingRemoved ? { thinkingRemoved: result.thinkingRemoved } : {}),
         });
       }
+      prompt();
+      continue;
+    }
+    const defaultsCmd = /^\/defaults(?:\s+(.*))?$/.exec(input);
+    if (defaultsCmd) {
+      const result = await runDefaultsCommand(defaultsCmd[1] ?? "", {
+        env: process.env,
+        path: settingsPath,
+        saved: savedSettings,
+        current: { provider: config.provider, model: config.model, showThinking: config.showThinking, maxTurns: config.maxTurns },
+        lastModel,
+      });
+      if (result.saved) {
+        savedSettings = result.saved;
+        transcript.log("session", { defaults: formatSettings(savedSettings).trim() });
+      }
+      console.log(result.output);
       prompt();
       continue;
     }

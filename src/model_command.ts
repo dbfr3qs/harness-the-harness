@@ -1,6 +1,7 @@
 import { ConfigError, checkModel, hasKey, isProvider, PROVIDER_NAMES, PROVIDERS, providerSettings } from "./config.ts";
 import type { Provider, ProviderSettings } from "./config.ts";
 import type { MenuItem } from "./menu.ts";
+import type { Settings } from "./settings.ts";
 import type { Message } from "./types.ts";
 
 export interface ModelCommandContext {
@@ -10,6 +11,8 @@ export interface ModelCommandContext {
   messages: Message[];
   /** The model last used with each provider this session, restored when switching back. */
   lastModel: Map<Provider, string>;
+  /** Saved defaults, for a provider's starting model when it hasn't been used this session. */
+  settings?: Settings;
   /** Shows a menu and resolves with the choice (undefined if cancelled); absent when input isn't a terminal. */
   choose?: <T>(title: string, items: MenuItem<T>[], initial: number) => Promise<T | undefined>;
 }
@@ -41,7 +44,7 @@ export async function runProviderCommand(args: string, ctx: ModelCommandContext)
 
   let settings: ProviderSettings;
   try {
-    settings = providerSettings(ctx.env, name, ctx.lastModel.get(name));
+    settings = providerSettings(ctx.env, name, ctx.lastModel.get(name), ctx.settings);
   } catch (err) {
     if (err instanceof ConfigError) return { output: `Not changed: ${err.message}` };
     throw err;
