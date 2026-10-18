@@ -28,6 +28,7 @@ A zero-dependency TypeScript CLI that chats with a model through the Anthropic M
 npm start                 # interactive REPL
 npm start -- --verbose    # print each tool call's full input and a one-line preview of every result
 npm start -- --plain      # the simple line-by-line REPL instead of the screen layout
+npm start -- --unattended # add run_shell/write_file and auto-approve every tool (sandbox only; see below)
 npm run check             # type-check (tsc --noEmit)
 npm test                  # unit tests (node --test), no network or API key needed
 ```
@@ -200,6 +201,7 @@ The harness starts with the provider, model, thinking, turns and max tokens sett
 | `MAX_TOOL_OUTPUT_CHARS` | `8000`                            | Tool results longer than this are truncated with a visible marker |
 | `WORKSPACE_ROOT`        | current directory                 | Sandbox root for the file tools |
 | `TRANSCRIPT_PATH`       | `./transcripts/<timestamp>.jsonl` | JSONL transcript file |
+| `UNATTENDED`            | `false`                           | Add `run_shell`/`write_file` and auto-approve every tool (`--unattended` does the same); only inside a sandbox (see [Unattended mode](#unattended-mode)) |
 
 ## Tools
 
@@ -209,8 +211,10 @@ The harness starts with the provider, model, thinking, turns and max tokens sett
 | `list_dir` | `path` (default `.`)      | One entry per line, directories end in `/`; capped at 200 entries |
 | `read_file`| `path` (required)         | UTF-8 file contents; refuses files over 256 KB |
 | `web_fetch`| `url` (required), `offset` | Readable text of a web page (HTML converted to text, links kept as absolute URLs), in parts of up to `MAX_TOOL_OUTPUT_CHARS` minus 500 |
+| `run_shell`| `command` (required)      | **Unattended mode only.** Combined stdout/stderr and exit status of `/bin/sh -c <command>` run in the workspace |
+| `write_file`| `path`, `content` (required) | **Unattended mode only.** Creates or overwrites a UTF-8 file in the workspace; refuses `.env`, private paths and paths outside the workspace |
 
-All tools are read-only. `web_fetch` is the only one that reaches the network. File tools only see paths inside `WORKSPACE_ROOT`: `..` traversal, absolute paths elsewhere, and symlinks that escape are refused. `read_file` never reads `.env` or `.env.*` files, in any directory, whatever the case, or through a symlink, because they hold secrets such as the API key. `list_dir` still shows that they exist.
+The four tools above are read-only and are always available. `web_fetch` is the only one that reaches the network. File tools only see paths inside `WORKSPACE_ROOT`: `..` traversal, absolute paths elsewhere, and symlinks that escape are refused. `read_file` never reads `.env` or `.env.*` files, in any directory, whatever the case, or through a symlink, because they hold secrets such as the API key. `list_dir` still shows that they exist.
 
 Some paths are private: neither tool reads or lists them, by any path or symlink, and `list_dir` leaves them out of listings with a note saying so.
 
@@ -218,7 +222,17 @@ Some paths are private: neither tool reads or lists them, by any path or symlink
 - **The transcript directory** (`transcripts/` by default; wherever `TRANSCRIPT_PATH` points). Transcripts hold whole past conversations, and without this a model could read conversations held with another provider. If `TRANSCRIPT_PATH` puts transcripts directly in the workspace root, only the current transcript file is private.
 - **Settings files**: `harness.json` (wherever `HARNESS_SETTINGS` points) and the web policy file (`web-policy.json`, or wherever `WEB_POLICY` points). The tool description already tells the model what the policy allows.
 
-**The model can't change any file.** No tool writes, deletes or runs anything; the only code that writes is the transcript logger and `/defaults save`, `/defaults clear` and `/policy save`, which run only when you type them. Slash commands are recognised only in what you type, never in model output. `test/boundaries.test.ts` fails if anything under `src/tools/` gains a write or execute API, or imports the code that saves settings, so a tool like that can't be added by accident (the spec requires the owner's approval for one).
+**In the normal harness the model can't change any file.** No tool writes, deletes or runs anything; the only code that writes is the transcript logger and `/defaults save`, `/defaults clear` and `/policy save`, which run only when you type them. Slash commands are recognised only in what you type, never in model output. `test/boundaries.test.ts` fails if anything directly under `src/tools/` gains a write or execute API, or if any tool imports the code that saves settings, so such a tool can't be added to the normal set by accident (the spec requires the owner's approval for one). The two tools that can write and run programs live in `src/tools/unattended/` and are added only in [unattended mode](#unattended-mode); the same test proves they never appear in the normal tool set.
+
+## Unattended mode
+
+Unattended mode is for running the harness **as an agent inside an isolated sandbox** — for example a benchmark container that holds a target program. It is off by default. Turn it on with `--unattended` or `UNATTENDED=1`, and the harness:
+
+- adds the `run_shell` and `write_file` tools, so the model can build, run and inspect programs and save files;
+- **auto-approves every tool**, with no per-call confirmation (including `web_fetch`), since nobody is at the keyboard;
+- prints a one-line warning at startup so it's obvious the guards are off.
+
+`run_shell` runs commands with this process's full permissions, so it can reach anything the user running the harness can — including outside `WORKSPACE_ROOT`. `write_file` still refuses `.env`, the harness's own settings and transcripts, and paths outside the workspace, but `run_shell` can step past those, so **the sandbox, not the tool, is the real boundary.** Do not use unattended mode on a machine whose files or network you care about.
 
 Tools reject arguments they don't define (for example an `offset` passed to `read_file`) instead of ignoring them, so the model isn't misled by a result that silently ignored part of its request.
 
@@ -356,6 +370,7 @@ src/
   client.ts       createAnthropicClient(): fetch + timeout + retry, streaming or not
   sse.ts          SSE parsing; rebuilds the streamed message exactly as the API would return it
   registry.ts     defineTool, createRegistry, dispatch
+  agent_tools.ts  assembleTools(): which tools the model gets (adds the unattended ones)
   agent.ts        runAgent(): the loop
   log.ts          JSONL transcript writer
   repl.ts         CLI entry point
@@ -371,6 +386,7 @@ src/
   defaults_command.ts /defaults
   turns_command.ts /turns
   tools/          workspace sandboxing, private paths, get_time, list_dir, read_file, web_fetch, web_policy
+    unattended/   run_shell and write_file (added only in unattended mode)
 test/             unit tests (fake model, fake fetch, temp dirs)
 ```
 

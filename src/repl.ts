@@ -23,10 +23,8 @@ import { createScreen } from "./screen.ts";
 import { createLineTerminal } from "./terminal.ts";
 import type { Terminal } from "./terminal.ts";
 import { describeTurns, runTurnsCommand } from "./turns_command.ts";
-import { getTimeTool } from "./tools/get_time.ts";
-import { createListDirTool } from "./tools/list_dir.ts";
+import { assembleTools } from "./agent_tools.ts";
 import type { PrivatePath } from "./tools/private_paths.ts";
-import { createReadFileTool } from "./tools/read_file.ts";
 import { createWebFetchTool } from "./tools/web_fetch.ts";
 import { loadWebPolicy } from "./tools/web_policy.ts";
 import type { CompiledPolicy } from "./tools/web_policy.ts";
@@ -127,6 +125,7 @@ async function main(): Promise<void> {
   try {
     savedSettings = await loadSettings(settingsPath);
     config = loadConfig(process.env, savedSettings);
+    if (process.argv.includes("--unattended")) config = { ...config, unattended: true };
   } catch (err) {
     if (err instanceof ConfigError) {
       console.error(`Config error: ${err.message}`);
@@ -281,6 +280,10 @@ async function main(): Promise<void> {
   // "a" approves the host for the rest of the session.
   const approvedHosts = new Map<string, string>(); // host -> origin, so /policy save can keep them as rules
   const confirmFetch = async (url: URL, signal: AbortSignal): Promise<boolean> => {
+    if (config.unattended) {
+      transcript.log("tool_call", { approval: { url: url.href, answer: "auto", allowed: true } });
+      return true; // unattended mode approves every tool; the sandbox is the boundary
+    }
     if (approvedHosts.has(url.host)) return true;
     activity("waiting for your approval");
     endThinking();
@@ -314,12 +317,9 @@ async function main(): Promise<void> {
     { path: resolve(settingsPath), name: settingsPath, holds: "the harness's saved settings" },
     { path: resolve(config.webPolicyPath), name: config.webPolicyPath, holds: "the web_fetch site policy" },
   ];
-  const registry = createRegistry([
-    getTimeTool,
-    createListDirTool(config.workspaceRoot, privatePaths),
-    createReadFileTool(config.workspaceRoot, privatePaths),
-    webFetch,
-  ]);
+  const registry = createRegistry(
+    assembleTools({ workspaceRoot: config.workspaceRoot, privatePaths, webFetch, unattended: config.unattended }),
+  );
   const messages: Message[] = [];
   const lastModel = new Map<Provider, string>(); // per provider, for /provider switching back
 
@@ -409,6 +409,12 @@ async function main(): Promise<void> {
       : "web policy: none (web_fetch asks before every fetch) · /policy to set one",
   );
   if (term.screen) say(dim("Type while the model works: your message reaches it at its next step. Ctrl+C stops a run."));
+  if (config.unattended) {
+    say(
+      "⚠ UNATTENDED MODE: run_shell and write_file are enabled and every tool is auto-approved, with no confirmation. " +
+        "The model can run programs and write files with this process's permissions. Use this only inside an isolated sandbox.",
+    );
+  }
   updateStatus();
   term.ready();
 

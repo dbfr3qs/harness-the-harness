@@ -62,6 +62,10 @@ export interface Config {
   transcriptPath: string;
   webPolicyPath: string;
   webPolicyRequired: boolean; // WEB_POLICY was set explicitly, so a missing file is an error
+  // Unattended ("bypass") mode: adds run_shell and write_file and auto-approves every tool,
+  // with no per-call confirmation. For running the harness as an agent inside an isolated
+  // sandbox (e.g. a benchmark container), never on a machine you care about.
+  unattended: boolean;
 }
 
 export class ConfigError extends Error {}
@@ -197,5 +201,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, saved: Settings
     transcriptPath: env.TRANSCRIPT_PATH || join("transcripts", `${timestamp()}.jsonl`),
     webPolicyPath: env.WEB_POLICY || "web-policy.json",
     webPolicyRequired: Boolean(env.WEB_POLICY),
+    unattended: bool(env, "UNATTENDED", false),
   };
 }
