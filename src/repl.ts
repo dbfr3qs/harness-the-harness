@@ -1,16 +1,14 @@
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
-import { createInterface } from "node:readline/promises";
 import { runAgent } from "./agent.ts";
 import type { AgentResult } from "./agent.ts";
 import { createAnthropicClient, fetchContextWindow, returnsThinkingOnRequest } from "./client.ts";
 import { contextAfter, contextSummary, describeContext, fullWarning, WARN_AT } from "./context_meter.ts";
 import type { ContextReading } from "./context_meter.ts";
 import type { ClientHooks } from "./client.ts";
-import { COMMANDS, completeSlashCommand } from "./complete.ts";
+import { COMMANDS } from "./complete.ts";
 import type { CompletionState } from "./complete.ts";
 import { ConfigError, loadConfig, PROVIDERS } from "./config.ts";
 import type { Config, Provider } from "./config.ts";
-import { selectFromMenu } from "./menu.ts";
 import { runModelCommand, runProviderCommand } from "./model_command.ts";
 import type { ModelCommandContext } from "./model_command.ts";
 import { createTranscriptLogger } from "./log.ts";
@@ -19,7 +17,9 @@ import { createRegistry } from "./registry.ts";
 import { runDefaultsCommand } from "./defaults_command.ts";
 import { DEFAULT_SETTINGS_PATH, formatSettings, loadSettings } from "./settings.ts";
 import type { Settings } from "./settings.ts";
-import { createSpinner } from "./spinner.ts";
+import { createScreen } from "./screen.ts";
+import { createLineTerminal } from "./terminal.ts";
+import type { Terminal } from "./terminal.ts";
 import { describeTurns, runTurnsCommand } from "./turns_command.ts";
 import { getTimeTool } from "./tools/get_time.ts";
 import { createListDirTool } from "./tools/list_dir.ts";
@@ -29,12 +29,17 @@ import { createWebFetchTool } from "./tools/web_fetch.ts";
 import { loadWebPolicy } from "./tools/web_policy.ts";
 import type { CompiledPolicy } from "./tools/web_policy.ts";
 import type { AgentHooks } from "./agent.ts";
+import { addUserText } from "./history.ts";
 import type { Message, ToolUseBlock } from "./types.ts";
 
 const SYSTEM_PROMPT =
   "You are a helpful assistant running in a command-line harness. Answer concisely and accurately.";
 
 const verbose = process.argv.includes("--verbose");
+// The full-screen layout needs a terminal on both sides; --plain asks for the line REPL anyway.
+const useScreen = Boolean(process.stdin.isTTY && process.stdout.isTTY) && !process.argv.includes("--plain");
+// Commands that only read state, so they can run while the model is working.
+const BUSY_OK = new Set(["/context", "/history"]);
 const QUIT_GRACE_MS = 1500;
 const dim = (s: string) => (process.stdout.isTTY ? `\x1b[2m${s}\x1b[0m` : s);
 
@@ -100,24 +105,6 @@ function stopNotice(result: AgentResult, config: Config): string | undefined {
   }
 }
 
-// Adds the user's text to history and returns an undo function for when the model call fails
-// before anything else is appended. If history ends in tool results (after max_turns), the text
-// joins that message, because two user messages in a row would separate the results from their calls.
-function addUserText(messages: Message[], text: string): () => void {
-  const last = messages.at(-1);
-  if (last?.role === "user" && Array.isArray(last.content) && last.content.at(-1)?.type === "tool_result") {
-    const blocks = last.content;
-    blocks.push({ type: "text", text });
-    return () => {
-      blocks.pop();
-    };
-  }
-  messages.push({ role: "user", content: text });
-  return () => {
-    messages.pop();
-  };
-}
-
 // Transcripts hold whole past conversations, so the model's file tools must not read them:
 // otherwise one provider could be handed conversations held with another. If transcripts are
 // written straight into the workspace root, only the current file can be singled out.
@@ -157,83 +144,104 @@ async function main(): Promise<void> {
 
   // Tab completes slash commands; the state is filled in once the policy store exists.
   let completionState = (): CompletionState => ({ models: [], policyPatterns: [] });
-  const rl = createInterface({
-    input: process.stdin,
-    output: process.stdout,
-    completer: (line: string) => completeSlashCommand(line, completionState()),
-  });
-  // With piped input, stdin can hit EOF (closing readline) while buffered lines are still being processed.
-  let closed = false;
-  rl.on("close", () => {
-    closed = true;
-  });
+  const term: Terminal = useScreen
+    ? createScreen({ completion: () => completionState() })
+    : createLineTerminal({ completion: () => completionState() });
 
   const transcript = createTranscriptLogger(config.transcriptPath, { secrets: config.secrets });
 
-  // Streamed text arrives in pieces, so track whether the cursor is at the start of a line.
-  // The spinner redraws its line with \r, so it must only ever start on an empty line.
-  const spinner = createSpinner();
-  let atLineStart = true;
-  const write = (text: string) => {
-    if (text === "") return;
-    process.stdout.write(text);
-    atLineStart = text.endsWith("\n");
-  };
-  const endLine = () => {
-    if (!atLineStart) write("\n");
-  };
   // Thinking prints dimmed, after a "✻", with continuation lines indented to match.
   let inThinking = false;
   const showThinking = (text: string) => {
-    spinner.stop();
     if (!inThinking) {
-      endLine();
-      write(dim("✻ "));
+      term.endLine();
+      term.write(dim("✻ "));
       inThinking = true;
     }
-    write(dim(text.replace(/\n/g, "\n  ")));
+    term.write(dim(text.replace(/\n/g, "\n  ")));
   };
   const endThinking = () => {
     if (!inThinking) return;
     inThinking = false;
-    endLine();
+    term.endLine();
   };
   const say = (line: string) => {
-    spinner.stop();
     endThinking();
-    endLine();
-    write(`${line}\n`);
+    term.endLine();
+    term.write(`${line}\n`);
+  };
+
+  // What the agent is doing, for the status bar (screen) or the waiting dots (line mode, which
+  // only animates while nothing is being printed).
+  let currentActivity: string | undefined;
+  const activity = (label: string | undefined) => {
+    if (label === currentActivity) return;
+    currentActivity = label;
+    if (term.screen) term.activity(label);
+    else term.activity(label === "waiting for the model" ? label : undefined);
+  };
+
+  // --- status bar: provider and model, live context, turns, queued messages -----------------
+  let contextUsed = 0;
+  let contextStale: string | undefined; // set after a switch, until the next response re-measures
+  let streamedChars = 0; // text and thinking streamed in the current response, for a live estimate
+  let windowNow: number | undefined;
+  let turnsThisRun = 0;
+  const pendingInput: string[] = []; // sent while busy; delivered at the model's next step
+  const showQueued = () =>
+    term.notes(pendingInput.map((t) => `↳ for the model's next step: ${oneLine(t, 200)}`));
+  const updateStatus = () => {
+    if (!term.screen) return;
+    const estimate = streamedChars ? Math.ceil(streamedChars / 4) : 0; // ~4 characters per token
+    const used = contextUsed + estimate;
+    const ctx = messages.length || estimate
+      ? contextSummary({ used, window: windowNow, ...(contextStale || estimate ? { stale: "estimate" } : {}) })
+      : `context empty${windowNow ? ` (${formatTokensShort(windowNow)} window)` : ""}`;
+    const parts = [`${config.provider} / ${config.model}`, ctx];
+    if (running) parts.push(`turn ${turnsThisRun}${Number.isFinite(config.maxTurns) ? `/${config.maxTurns}` : ""}`);
+    if (pendingInput.length) parts.push(`${pendingInput.length} queued for the next step`);
+    if (config.showThinking) parts.push("thinking shown");
+    term.status(parts.join(" · "));
   };
 
   const clientHooks: ClientHooks = {
     onRequest: (body) => {
       transcript.log("request", body);
       endThinking();
-      endLine();
-      spinner.start();
+      term.endLine();
+      streamedChars = 0;
+      turnsThisRun++; // the model call starting now
+      activity("waiting for the model");
+      updateStatus();
     },
     onRetry: (info) => {
       transcript.log("error", { message: `retrying: ${info.reason}`, ...info });
-      spinner.stop();
-      endLine();
-      console.error(`  [retry ${info.attempt}/${config.maxRetries} in ${info.delayMs} ms: ${info.reason}]`);
-      spinner.start();
+      say(`  [retry ${info.attempt}/${config.maxRetries} in ${info.delayMs} ms: ${info.reason}]`);
+      activity(undefined);
+      activity("waiting for the model");
     },
     onTextDelta: (text) => {
-      spinner.stop();
       endThinking();
-      write(text);
+      activity("writing");
+      term.write(text);
+      streamedChars += text.length;
+      updateStatus();
     },
-    onThinkingDelta: showThinking,
+    onThinkingDelta: (text) => {
+      activity("thinking");
+      showThinking(text);
+      streamedChars += text.length;
+      updateStatus();
+    },
   };
   // Replaced when /provider or /model changes the settings.
   let model = createAnthropicClient(config, clientHooks);
   const hooks: AgentHooks = {
     onResponse: (res) => {
-      spinner.stop();
       transcript.log("response", res);
       contextUsed = contextAfter(res);
       contextStale = undefined;
+      streamedChars = 0;
       // Streaming already printed thinking as it arrived; otherwise print it now, before any tool calls.
       if (config.showThinking && !config.stream) {
         for (const block of res.content) {
@@ -244,16 +252,27 @@ async function main(): Promise<void> {
         }
       }
       endThinking();
+      activity(undefined);
+      updateStatus();
     },
     onToolCall: (call) => {
       transcript.log("tool_call", { id: call.id, name: call.name, input: call.input });
       // Always shown, so a run of tool calls with no text in between isn't just a silent wait.
       say(verbose ? `  → ${call.name} ${JSON.stringify(call.input)}` : dim(`  → ${describeCall(call)}`));
+      activity(`running ${call.name}`);
     },
     onToolResult: (call, outcome) => {
       transcript.log("tool_result", { tool_use_id: call.id, name: call.name, ...outcome });
       if (verbose) say(`  ← ${outcome.isError ? "error" : "ok"}: ${oneLine(outcome.content)}`);
       else if (outcome.isError) say(dim(`    ✗ ${oneLine(outcome.content.replace(/^Error:\s*/, ""), 100)}`));
+    },
+    onUserInput: (texts) => {
+      transcript.log("session", { deliveredWhileBusy: texts });
+      // Shown in the conversation now, between steps, rather than when typed (mid-output).
+      for (const t of texts) say(`\x1b[1m> \x1b[0m${t}`);
+      say(dim("  (sent to the model at its next step)"));
+      showQueued();
+      updateStatus();
     },
   };
   // web_fetch asks before every fetch, because a fetched URL can carry workspace data out.
@@ -261,17 +280,13 @@ async function main(): Promise<void> {
   const approvedHosts = new Map<string, string>(); // host -> origin, so /policy save can keep them as rules
   const confirmFetch = async (url: URL, signal: AbortSignal): Promise<boolean> => {
     if (approvedHosts.has(url.host)) return true;
-    spinner.stop();
-    endLine();
+    activity("waiting for your approval");
+    endThinking();
     const shown = url.href.length > 500 ? `${url.href.slice(0, 500)}… (${url.href.length - 500} more chars)` : url.href;
-    let answer: string;
-    try {
-      answer = (await rl.question(`  Allow web_fetch of ${shown}?\n  [y]es / [n]o / [a]lways for ${url.host}: `, { signal }))
-        .trim()
-        .toLowerCase();
-    } catch {
-      return false; // input closed, or the run was interrupted: treat as declined
-    }
+    const answer = (await term.ask(`  Allow web_fetch of ${shown}?\n  [y]es / [n]o / [a]lways for ${url.host}: `, signal))
+      .trim()
+      .toLowerCase();
+    activity("running web_fetch");
     const allowed = answer === "y" || answer === "yes" || answer === "a" || answer === "always";
     if ((answer === "a" || answer === "always") && !approvedHosts.has(url.host)) approvedHosts.set(url.host, url.origin);
     transcript.log("tool_call", { approval: { url: url.href, answer, allowed } });
@@ -306,9 +321,6 @@ async function main(): Promise<void> {
   const messages: Message[] = [];
   const lastModel = new Map<Provider, string>(); // per provider, for /provider switching back
 
-  // The context meter: tokens in use after the last response, against the model's window.
-  let contextUsed = 0;
-  let contextStale: string | undefined; // set after a switch, until the next response re-measures
   const windows = new Map<string, Promise<number | undefined>>(); // looked up once per model
   const contextWindow = (): Promise<number | undefined> => {
     if (config.contextWindow) return Promise.resolve(config.contextWindow);
@@ -322,89 +334,129 @@ async function main(): Promise<void> {
     }
     return window;
   };
-  void contextWindow(); // start the lookup now, so it's ready by the first answer
+  const refreshWindow = () => {
+    const key = `${config.provider}/${config.model}`;
+    void contextWindow().then((w) => {
+      if (key !== `${config.provider}/${config.model}`) return; // switched again meanwhile
+      windowNow = w;
+      updateStatus();
+    });
+  };
+  refreshWindow();
   const contextReading = async (): Promise<ContextReading> => ({
     used: contextUsed,
     window: await contextWindow(),
     ...(contextStale ? { stale: contextStale } : {}),
   });
 
-  const prompt = () => {
-    if (!closed) rl.prompt();
-  };
+  let running: AbortController | undefined; // set while a message is being answered
+  let runFinishedAt = 0; // when the last run ended without an interrupt
+  let quitArmed = false;
   const quit = () => {
-    spinner.stop();
     endThinking();
-    endLine();
-    console.log("Bye.");
-    rl.close();
+    term.endLine();
+    term.write("Bye.\n");
+    term.close();
     void transcript.flush().finally(() => process.exit(0));
   };
   // Ctrl+C: during a run, the first press stops the run and a second quits (in case it doesn't
   // stop promptly); at the prompt, it clears typed text, and on an empty line it quits.
-  rl.on("SIGINT", () => {
+  term.onInterrupt(() => {
     if (running) {
       if (running.signal.aborted) return quit();
       running.abort();
-      spinner.stop();
+      activity(undefined);
       say(dim("  [interrupting… press Ctrl+C again to quit]"));
       return;
     }
-    if (rl.line !== "") {
-      rl.write(null, { ctrl: true, name: "e" }); // to the end of the line,
-      rl.write(null, { ctrl: true, name: "u" }); // then delete back to the start
+    if (term.inputText() !== "") {
+      term.setInput("");
       return;
     }
     // A press meant to interrupt can land just after the run finished on its own; don't let
     // that quit. After an interrupt, the next press quits as expected.
     if (!quitArmed && Date.now() - runFinishedAt < QUIT_GRACE_MS) {
       quitArmed = true;
-      process.stdout.write(`\n${dim("(the run had already finished; press Ctrl+C again to quit)")}\n`);
-      prompt();
+      say(dim("(the run had already finished; press Ctrl+C again to quit)"));
+      term.ready();
       return;
     }
-    process.stdout.write("\n");
+    if (!term.screen) term.write("\n");
     quit();
   });
 
-  console.log(
+  say(
     `harness · ${config.provider} / ${config.model} · ${registry.definitions().length} tool(s) · ${config.stream ? "streaming" : "non-streaming"} · /exit /reset /history /policy /provider /model /thinking /turns /defaults /context`,
   );
-  console.log(`transcript: ${transcript.path}`);
-  console.log(
+  say(`transcript: ${transcript.path}`);
+  say(
     webPolicy
       ? `web policy: ${config.webPolicyPath} (${webPolicy.policy.rules.length} rule(s), default ${webPolicy.policy.default}) · /policy to view or change`
       : "web policy: none (web_fetch asks before every fetch) · /policy to set one",
   );
-  rl.setPrompt("> ");
-  prompt();
+  if (term.screen) say(dim("Type while the model works: your message reaches it at its next step. Ctrl+C stops a run."));
+  updateStatus();
+  term.ready();
 
-  let running: AbortController | undefined; // set while a message is being answered
-  let runFinishedAt = 0; // when the last run ended without an interrupt
-  let quitArmed = false;
   // Set when /policy changes the policy mid-conversation; the next message carries a note to the model.
   let policyChangedSinceDescription = false;
   let exitWarned = false;
+  const autoSend: string[] = []; // messages typed during a run that it ended before delivering
 
-  for await (const raw of rl) {
+  // While a run is going, what's typed goes here: read-only commands run at once, other
+  // commands wait, and anything else is delivered to the model at its next step.
+  const onBusyInput = (text: string) => {
+    const input = text.trim();
+    const command = /^\/[a-z]+(?=\s|$)/i.exec(input)?.[0];
+    if (command && COMMANDS.includes(command)) {
+      if (BUSY_OK.has(input)) {
+        if (input === "/history") say(describeHistory(messages));
+        else void contextReading().then((r) => say(describeContext(r, config.model, messages.length)));
+      } else {
+        say(dim(`${command} can't run while the model is working. Use it when the run finishes, or press Ctrl+C to stop the run.`));
+        term.setInput(text);
+      }
+      return;
+    }
+    if (command) {
+      say(`Unknown command ${command}. Commands: ${COMMANDS.join(" ")} (Tab completes them)`);
+      term.setInput(text);
+      return;
+    }
+    pendingInput.push(input);
+    showQueued();
+    updateStatus();
+  };
+
+  const lines = term.lines()[Symbol.asyncIterator]();
+  while (true) {
+    let raw: string;
+    if (autoSend.length) {
+      raw = autoSend.shift()!;
+      say(`\x1b[1m> \x1b[0m${raw}`); // typed during the last run, which ended before it could deliver it
+    } else {
+      const next = await lines.next();
+      if (next.done) break;
+      raw = next.value;
+    }
     const input = raw.trim();
     if (input === "") {
-      prompt();
+      term.ready();
       continue;
     }
     if (input === "/exit") {
       if (policyStore.dirty() && !exitWarned) {
         exitWarned = true;
-        console.log("The web policy has unsaved changes. Run /policy save to keep them, or /exit again to discard them.");
-        prompt();
+        say("The web policy has unsaved changes. Run /policy save to keep them, or /exit again to discard them.");
+        term.ready();
         continue;
       }
       break;
     }
     exitWarned = false;
     if (input === "/context") {
-      console.log(describeContext(await contextReading(), config.model, messages.length));
-      prompt();
+      say(describeContext(await contextReading(), config.model, messages.length));
+      term.ready();
       continue;
     }
     if (input === "/reset") {
@@ -414,29 +466,24 @@ async function main(): Promise<void> {
       // With no history, the tool description can safely pick up the current policy.
       webFetch.refreshDescription();
       policyChangedSinceDescription = false;
-      console.log("History cleared.");
-      prompt();
+      say("History cleared.");
+      updateStatus();
+      term.ready();
       continue;
     }
     if (input === "/policy" || input.startsWith("/policy ")) {
       const result = await runPolicyCommand(input.slice("/policy".length), {
         store: policyStore,
         approvals: approvedHosts,
-        ask: async (question) => {
-          try {
-            return await rl.question(question);
-          } catch {
-            return "";
-          }
-        },
+        ask: (question) => term.ask(question),
       });
-      console.log(result.output);
+      say(result.output);
       if (result.changed) {
         transcript.log("tool_call", { web_policy_changed: { by: "user", policy: policyStore.current().policy } });
         if (messages.length === 0) webFetch.refreshDescription();
         else policyChangedSinceDescription = true;
       }
-      prompt();
+      term.ready();
       continue;
     }
     const providerCmd = /^\/provider(?:\s+(.*))?$/.exec(input);
@@ -448,14 +495,12 @@ async function main(): Promise<void> {
         messages,
         lastModel,
         settings: savedSettings,
-        ...(process.stdin.isTTY && process.stdout.isTTY
-          ? { choose: (title, items, initial) => selectFromMenu(process.stdin, process.stdout, title, items, initial) }
-          : {}),
+        ...(term.choose ? { choose: term.choose } : {}),
       };
       const result = providerCmd
         ? await runProviderCommand(providerCmd[1] ?? "", ctx)
         : await runModelCommand(modelCmd![1] ?? "", ctx);
-      console.log(result.output);
+      say(result.output);
       if (result.settings) {
         // Providers count tokens differently, and a switch may remove thinking blocks, so the last
         // reading is only approximate until the next response measures it again.
@@ -466,7 +511,8 @@ async function main(): Promise<void> {
           }; it updates after the next response`;
         }
         config = { ...config, ...result.settings };
-        void contextWindow();
+        windowNow = undefined;
+        refreshWindow();
         model = createAnthropicClient(config, clientHooks);
         transcript.log("session", {
           provider: config.provider,
@@ -474,8 +520,9 @@ async function main(): Promise<void> {
           baseUrl: config.baseUrl,
           ...(result.thinkingRemoved ? { thinkingRemoved: result.thinkingRemoved } : {}),
         });
+        updateStatus();
       }
-      prompt();
+      term.ready();
       continue;
     }
     const defaultsCmd = /^\/defaults(?:\s+(.*))?$/.exec(input);
@@ -484,15 +531,20 @@ async function main(): Promise<void> {
         env: process.env,
         path: settingsPath,
         saved: savedSettings,
-        current: { provider: config.provider, model: config.model, showThinking: config.showThinking, maxTurns: config.maxTurns },
+        current: {
+          provider: config.provider,
+          model: config.model,
+          showThinking: config.showThinking,
+          maxTurns: config.maxTurns,
+        },
         lastModel,
       });
       if (result.saved) {
         savedSettings = result.saved;
         transcript.log("session", { defaults: formatSettings(savedSettings).trim() });
       }
-      console.log(result.output);
-      prompt();
+      say(result.output);
+      term.ready();
       continue;
     }
     const turnsCmd = /^\/turns(?:\s+(.*))?$/.exec(input);
@@ -502,8 +554,9 @@ async function main(): Promise<void> {
         config = { ...config, maxTurns: result.maxTurns };
         transcript.log("session", { maxTurns: describeTurns(config.maxTurns) });
       }
-      console.log(result.output);
-      prompt();
+      say(result.output);
+      updateStatus();
+      term.ready();
       continue;
     }
     const thinkingCmd = /^\/thinking(?:\s+(.*))?$/.exec(input);
@@ -514,25 +567,26 @@ async function main(): Promise<void> {
         model = createAnthropicClient(config, clientHooks);
         transcript.log("session", { showThinking: config.showThinking });
       } else if (arg !== "") {
-        console.log("Usage: /thinking [on|off]");
-        prompt();
+        say("Usage: /thinking [on|off]");
+        term.ready();
         continue;
       }
-      console.log(describeThinking(config));
-      prompt();
+      say(describeThinking(config));
+      updateStatus();
+      term.ready();
       continue;
     }
     if (input === "/history") {
-      console.log(describeHistory(messages));
-      prompt();
+      say(describeHistory(messages));
+      term.ready();
       continue;
     }
 
     // A mistyped command shouldn't go to the model as a message. Paths like /etc/hosts still do.
     const unknown = /^\/[a-z]+(?=\s|$)/i.exec(input);
     if (unknown && !COMMANDS.includes(unknown[0])) {
-      console.log(`Unknown command ${unknown[0]}. Commands: ${COMMANDS.join(" ")} (Tab completes them)`);
-      prompt();
+      say(`Unknown command ${unknown[0]}. Commands: ${COMMANDS.join(" ")} (Tab completes them)`);
+      term.ready();
       continue;
     }
 
@@ -549,7 +603,13 @@ async function main(): Promise<void> {
     }
     const undo = addUserText(messages, text);
     const lengthAfterInput = messages.length;
+    const delivered: string[] = []; // messages typed during this run that reached the model
+    let takenBack = false; // the message was removed again: nothing came back for it
+    let backToInput = false; // put undelivered (or taken-back) messages back in the input box
     running = new AbortController();
+    turnsThisRun = 0;
+    term.onBusyInput = term.screen ? onBusyInput : undefined;
+    updateStatus();
     try {
       const result = await runAgent({
         model,
@@ -560,14 +620,25 @@ async function main(): Promise<void> {
         maxToolOutputChars: config.maxToolOutputChars,
         hooks,
         signal: running.signal,
+        takeUserInput: () => {
+          const texts = pendingInput.splice(0);
+          delivered.push(...texts);
+          return texts;
+        },
       });
       if (result.stopReason === "interrupted") {
         transcript.log("session", { interrupted: true, turns: result.turns, toolCalls: result.toolCalls });
+        backToInput = true;
         // Interrupted before any reply landed: take the message back, as after an error.
         if (messages.length === lengthAfterInput) {
           undo();
+          takenBack = true;
           if (noteAdded) policyChangedSinceDescription = true;
+        } else {
+          delivered.length = 0; // they're in the conversation
         }
+      } else {
+        delivered.length = 0;
       }
       // When streaming, the text has already been printed as it arrived.
       if (!config.stream && result.finalText && result.stopReason !== "interrupted") say(result.finalText);
@@ -580,24 +651,47 @@ async function main(): Promise<void> {
       // Nothing from the model landed, so take back the user's text and keep history valid.
       if (messages.length === lengthAfterInput) {
         undo();
+        takenBack = true;
         if (noteAdded) policyChangedSinceDescription = true; // resend the note with the next message
+      } else {
+        delivered.length = 0;
       }
+      backToInput = true;
       const message = err instanceof Error ? err.message : String(err);
       transcript.log("error", { message });
-      spinner.stop();
-      endLine();
-      console.error(`Error: ${message}`);
+      say(`Error: ${message}`);
     } finally {
       if (!running.signal.aborted) runFinishedAt = Date.now();
       running = undefined;
       quitArmed = false;
+      term.onBusyInput = undefined;
+      streamedChars = 0; // an interrupted response leaves no estimate behind
+      activity(undefined);
     }
-    prompt();
+    // Messages typed while the run was going that it didn't get to: sent next, unless the run
+    // was stopped or failed, in which case they go back in the input box to send or change.
+    // A message that got no reply goes back in the box too (screen only: line mode can't edit it).
+    const leftover = [...(takenBack && term.screen ? [input] : []), ...delivered, ...pendingInput.splice(0)];
+    showQueued();
+    if (leftover.length) {
+      if (backToInput) {
+        term.setInput([leftover.join("\n"), term.inputText()].filter(Boolean).join("\n"));
+        say(dim("(your message is back in the input box: Enter sends it again)"));
+      } else {
+        autoSend.push(leftover.join("\n\n"));
+      }
+    }
+    updateStatus();
+    term.ready();
   }
 
-  rl.close();
+  term.close();
   await transcript.flush();
   console.log("Bye.");
+}
+
+function formatTokensShort(n: number): string {
+  return n >= 1_000_000 ? `${n / 1_000_000}M` : n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
 }
 
 await main();

@@ -27,13 +27,37 @@ A zero-dependency TypeScript CLI that chats with a model through the Anthropic M
 ```sh
 npm start                 # interactive REPL
 npm start -- --verbose    # print each tool call's full input and a one-line preview of every result
+npm start -- --plain      # the simple line-by-line REPL instead of the screen layout
 npm run check             # type-check (tsc --noEmit)
 npm test                  # unit tests (node --test), no network or API key needed
 ```
 
 Run it directly with `node --env-file=.env src/repl.ts`.
 
-In the REPL:
+### The screen
+
+In a terminal, the harness keeps an input box and a status bar on the bottom rows, and the conversation scrolls above them:
+
+```
+> Call get_time twice, then say done.
+  → get_time
+Call 1 returned 17:51:14. Now call 2.
+↳ for the model's next step: also give me the timezone
+──────────────────────────────────────────────────────────────
+> 
+..... waiting for the model · deepseek / deepseek-flash · context 1.1k/1M (<1%) · turn 2/10
+```
+
+- **The status bar** shows what the agent is doing (waiting for the model, thinking, writing, running a tool, waiting for your approval), the provider and model, the context meter (updated as each response streams in, as an estimate, then measured), the turn count and any queued messages.
+- **You can type at any time.** A message sent while the model is working is shown above the input box and delivered at the model's next step (with the next model call, after any tool results), so you can steer a run in progress. If the model finishes before it gets there, the message is sent as soon as the run ends. If you stop the run with Ctrl+C, or it fails, the message goes back in the input box instead, and so does a message that got no reply.
+- While the model is working, `/context` and `/history` run immediately; other commands wait until the run finishes (they stay in the input box).
+- **Editing:** ←/→, Home/End (Ctrl+A/E), Backspace/Delete, Ctrl+U/K (delete to start/end), Ctrl+W (delete word), ↑/↓ for earlier messages, Tab to complete, Ctrl+L to redraw. Pasted text keeps its line breaks (shown as `↵`) and is sent only when you press Enter; Alt+Enter adds a line break where the terminal reports it.
+- Menus (`/provider`, `/model`) and questions (`web_fetch` approval, `/policy save`) appear in the panel above the input box.
+- Scrollback keeps the whole conversation: the panel is redrawn below the output rather than pinned with a terminal scroll region, which many terminals don't keep in scrollback. On a resize the harness asks the terminal where the cursor is and redraws the panel on the bottom row; this is best-effort, and Ctrl+L redraws if anything looks off.
+
+The screen needs a terminal for both input and output. With piped input or output, or `--plain`, the harness uses the line-by-line REPL: the prompt follows the output, messages typed during a run wait until it finishes, and dots show while it's waiting for the model.
+
+### Commands
 
 | Command    | Effect |
 | ---------- | ------ |
@@ -50,11 +74,12 @@ In the REPL:
 
 Press Tab to complete commands and their arguments (provider names, the current provider's models, `/policy` subcommands and existing rule patterns); press it twice to list the options. A line that starts with an unknown `/word` is reported as an unknown command rather than sent to the model; paths such as `/etc/hosts` still go through.
 
-Responses stream by default: text appears as the model writes it, and an animated row of dots (one to five and back) shows while it's waiting for the first output of each model call. The dots only appear when output is a terminal. Set `STREAM=0` to use plain non-streaming requests.
+Responses stream by default: text appears as the model writes it, and an animated row of dots (one to five and back) shows while it's waiting, in the status bar (or, in the line REPL, on its own line). Set `STREAM=0` to use plain non-streaming requests.
 
 Each tool call is shown as a dim line as it runs (`→ read_file src/agent.ts`), with a `✗` line under it if the tool returned an error, so a long run of tool calls is never a silent wait. The model's thinking is hidden unless you turn it on with `/thinking on`.
 
 After each answer the REPL prints that exchange's token totals, the number of model calls and the number of tool calls, e.g. `[tokens: 9413 in + 42240 cached, 5951 out · 8 model call(s) · 19 tool call(s)]`. "Cached" is input the provider served from its prompt cache (DeepSeek caches automatically); it is still input the model read, just billed at a lower rate. If the loop stops early, it says why: `MAX_TURNS` reached while the model was still calling tools, `MAX_TOKENS` cut-off, or a refusal. After `MAX_TURNS`, send another message and the model continues where it left off; `/turns <n>` raises the limit first if it needs more room.
+
 
 ### Context meter
 
@@ -72,7 +97,7 @@ Context: 250,000 of 1,000,000 tokens (25%) · claude-haiku-5-5 · 12 message(s)
 
 ### Stopping a run
 
-Press **Ctrl+C** while the model is working to stop it and get the prompt back. The request in flight is cancelled, a `web_fetch` in progress or waiting for approval is abandoned, and the conversation keeps every completed step: tool calls that had not run yet are recorded as interrupted, so you can send "continue" just as after `MAX_TURNS`. A partly written reply is discarded, and if nothing had come back yet, your message is taken back too.
+Press **Ctrl+C** while the model is working to stop it and get the prompt back. The request in flight is cancelled, a `web_fetch` in progress or waiting for approval is abandoned, and the conversation keeps every completed step: tool calls that had not run yet are recorded as interrupted, so you can send "continue" just as after `MAX_TURNS`. A partly written reply is discarded, and if nothing had come back yet, your message is taken back too (on the screen, it's put back in the input box so Enter sends it again).
 
 | Where | Ctrl+C does |
 | ----- | ----------- |
@@ -332,7 +357,10 @@ src/
   log.ts          JSONL transcript writer
   repl.ts         CLI entry point
   spinner.ts      waiting animation
-  menu.ts         arrow-key menu for the terminal
+  terminal.ts     the Terminal interface, and the line-by-line REPL
+  screen.ts       the screen: input box, status bar, line editor, menus and questions in the panel
+  history.ts      adding the user's message to history, with an exact undo
+  menu.ts         arrow-key menu (logic shared by both; the line REPL draws it in place)
   complete.ts     Tab completion for slash commands
   model_command.ts /provider and /model
   settings.ts     harness.json: load, validate, save

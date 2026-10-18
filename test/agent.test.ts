@@ -303,3 +303,29 @@ test("an already-aborted signal makes no model call; unlimited turns run until t
   assert.equal(out.stopReason, "done");
   assert.equal(out.turns, 31);
 });
+
+test("messages typed during a run reach the model at its next step", async () => {
+  const pending = ["", "look in src instead"]; // nothing before the first call; one before the second
+  const delivered: string[][] = [];
+  const { model, requests } = fakeModel([reply([toolUse("echo", { text: "a" })]), reply([text("done")])]);
+  const messages = [user("go")];
+  await run(model, messages, {
+    takeUserInput: () => {
+      const next = pending.shift();
+      return next ? [next] : [];
+    },
+    hooks: { onUserInput: (t) => delivered.push(t) },
+  });
+  assert.deepEqual(delivered, [["look in src instead"]]);
+  const secondCall = requests[1]!.messages.at(-1)!;
+  assert.equal(secondCall.role, "user");
+  const blocks = secondCall.content as { type: string; text?: string }[];
+  assert.deepEqual(blocks.map((b) => b.type), ["tool_result", "text"], "after the tool results, in the same message");
+  assert.equal(blocks[1]!.text, "look in src instead");
+});
+
+test("a message typed before the first model call joins the prompt", async () => {
+  const { model, requests } = fakeModel([reply([text("ok")])]);
+  await run(model, [user("go")], { takeUserInput: () => ["and be brief"] });
+  assert.deepEqual(requests[0]!.messages, [{ role: "user", content: [{ type: "text", text: "go" }, { type: "text", text: "and be brief" }] }]);
+});

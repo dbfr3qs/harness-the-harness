@@ -6,6 +6,7 @@ export interface AgentHooks {
   onResponse?: (res: MessageResponse) => void; // usage, logging
   onToolCall?: (call: ToolUseBlock) => void;
   onToolResult?: (call: ToolUseBlock, outcome: ToolOutcome) => void;
+  onUserInput?: (texts: string[]) => void; // messages from takeUserInput, as they're added
 }
 
 export type AgentStopReason = "done" | "max_turns" | "max_tokens" | "refusal" | "interrupted";
@@ -42,6 +43,9 @@ export async function runAgent(opts: {
   // Aborting stops the run at the next safe point, leaving history valid: an interrupted model
   // call adds nothing, and tool calls that didn't run get an error result.
   signal?: AbortSignal;
+  // Messages the user sent while the run was going. Called before each model call; anything
+  // returned joins the last user message, so the model sees it at its next step.
+  takeUserInput?: () => string[];
 }): Promise<AgentResult> {
   const { model, registry, system, messages, maxTurns, maxToolOutputChars, hooks = {}, signal } = opts;
   const tools = registry.definitions();
@@ -59,6 +63,11 @@ export async function runAgent(opts: {
 
   while (turns < maxTurns) {
     if (signal?.aborted) return finish("interrupted");
+    const interjected = opts.takeUserInput?.() ?? [];
+    if (interjected.length) {
+      appendUserText(messages, interjected);
+      hooks.onUserInput?.(interjected);
+    }
     let res: MessageResponse;
     try {
       res = await model({ system, messages, tools, ...(signal ? { signal } : {}) });
@@ -110,6 +119,19 @@ export async function runAgent(opts: {
   }
 
   return finish("max_turns");
+}
+
+// Before a model call the last message is always the user's: their prompt or the tool results.
+function appendUserText(messages: Message[], texts: string[]): void {
+  const last = messages.at(-1);
+  const blocks = texts.map((text) => ({ type: "text" as const, text }));
+  if (last?.role !== "user") {
+    messages.push({ role: "user", content: blocks });
+  } else if (typeof last.content === "string") {
+    last.content = [{ type: "text", text: last.content }, ...blocks];
+  } else {
+    last.content.push(...blocks);
+  }
 }
 
 function truncate(outcome: ToolOutcome, max: number): ToolOutcome {
