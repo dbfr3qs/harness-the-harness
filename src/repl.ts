@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { runAgent } from "./agent.ts";
 import type { AgentResult } from "./agent.ts";
@@ -20,7 +21,7 @@ import { runDefaultsCommand } from "./defaults_command.ts";
 import { DEFAULT_SETTINGS_PATH, formatSettings, loadSettings } from "./settings.ts";
 import type { Settings } from "./settings.ts";
 import { createScreen } from "./screen.ts";
-import { createLineTerminal } from "./terminal.ts";
+import { createBatchTerminal, createLineTerminal } from "./terminal.ts";
 import type { Terminal } from "./terminal.ts";
 import { describeTurns, runTurnsCommand } from "./turns_command.ts";
 import { assembleTools } from "./agent_tools.ts";
@@ -36,7 +37,15 @@ const SYSTEM_PROMPT =
   "You are a helpful assistant running in a command-line harness. Answer concisely and accurately.";
 
 const verbose = process.argv.includes("--verbose");
-// The full-screen layout needs a terminal on both sides; --plain asks for the line REPL anyway.
+// --prompt-file <path> (or PROMPT_FILE) runs one prompt from a file non-interactively and exits:
+// batch mode, for running the harness as an agent inside a sandbox. Pair it with --unattended.
+function promptFilePath(): string | undefined {
+  const i = process.argv.indexOf("--prompt-file");
+  if (i >= 0 && process.argv[i + 1]) return process.argv[i + 1];
+  const eq = process.argv.find((a) => a.startsWith("--prompt-file="));
+  return eq ? eq.slice("--prompt-file=".length) : process.env.PROMPT_FILE || undefined;
+}
+// The full-screen layout needs a terminal on both sides; --plain and batch mode ask for a plain one.
 const useScreen = Boolean(process.stdin.isTTY && process.stdout.isTTY) && !process.argv.includes("--plain");
 // Commands that only read state, so they can run while the model is working.
 const BUSY_OK = new Set(["/context", "/history"]);
@@ -143,11 +152,26 @@ async function main(): Promise<void> {
     process.exit(1);
   }
 
+  // Batch mode: read the one prompt now, so a missing file fails before any setup.
+  const promptFile = promptFilePath();
+  let batchPrompt: string | undefined;
+  if (promptFile !== undefined) {
+    try {
+      batchPrompt = await readFile(promptFile, "utf8");
+    } catch (err) {
+      console.error(`Config error: could not read --prompt-file ${promptFile}: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+  }
+
   // Tab completes slash commands; the state is filled in once the policy store exists.
   let completionState = (): CompletionState => ({ models: [], policyPatterns: [] });
-  const term: Terminal = useScreen
-    ? createScreen({ completion: () => completionState() })
-    : createLineTerminal({ completion: () => completionState() });
+  const term: Terminal =
+    batchPrompt !== undefined
+      ? createBatchTerminal(batchPrompt)
+      : useScreen
+        ? createScreen({ completion: () => completionState() })
+        : createLineTerminal({ completion: () => completionState() });
 
   const transcript = createTranscriptLogger(config.transcriptPath, { secrets: config.secrets });
 

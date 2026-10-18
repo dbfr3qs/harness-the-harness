@@ -29,6 +29,7 @@ npm start                 # interactive REPL
 npm start -- --verbose    # print each tool call's full input and a one-line preview of every result
 npm start -- --plain      # the simple line-by-line REPL instead of the screen layout
 npm start -- --unattended # add run_shell/write_file and auto-approve every tool (sandbox only; see below)
+npm start -- --prompt-file task.txt --unattended  # run one prompt from a file, then exit (batch mode)
 npm run check             # type-check (tsc --noEmit)
 npm test                  # unit tests (node --test), no network or API key needed
 ```
@@ -233,6 +234,16 @@ Unattended mode is for running the harness **as an agent inside an isolated sand
 - prints a one-line warning at startup so it's obvious the guards are off.
 
 `run_shell` runs commands with this process's full permissions, so it can reach anything the user running the harness can — including outside `WORKSPACE_ROOT`. `write_file` still refuses `.env`, the harness's own settings and transcripts, and paths outside the workspace, but `run_shell` can step past those, so **the sandbox, not the tool, is the real boundary.** Do not use unattended mode on a machine whose files or network you care about.
+
+### Batch mode
+
+`--prompt-file <path>` (or `PROMPT_FILE=<path>`) reads the whole file as a single prompt, runs it to completion once, writes the model's output to stdout, and exits at end of input — no REPL. It's meant for running the harness as an agent from a script or a container, so it's normally paired with `--unattended`:
+
+```sh
+node --env-file=.env src/repl.ts --unattended --prompt-file /tmp/prompt.txt
+```
+
+Point `BASE_URL` at a metering proxy and `MODEL` at the model to use; `MAX_TURNS=unlimited` lets a task run until it's done (or until the surrounding harness kills it on a timeout). This is the shape an evaluation harness such as [ExploitGym](https://github.com/sunblaze-ucb/exploitgym) expects: it writes the task into the container, runs the agent with tools enabled and approvals bypassed in the task's `/workspace`, and grades the result itself.
 
 Tools reject arguments they don't define (for example an `offset` passed to `read_file`) instead of ignoring them, so the model isn't misled by a result that silently ignored part of its request.
 

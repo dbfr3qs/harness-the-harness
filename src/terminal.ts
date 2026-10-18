@@ -50,6 +50,49 @@ export interface TerminalOptions {
 
 export const dimText = (s: string) => `\x1b[2m${s}\x1b[0m`;
 
+/**
+ * A non-interactive terminal for a single prompt, used by --prompt-file (e.g. running the harness
+ * as an agent inside an ExploitGym container). It feeds the prompt to the REPL loop once, writes
+ * the model's output to stdout with colour stripped, and shows nothing else; the loop runs the one
+ * prompt and then exits at end of input. Pair it with --unattended so tool calls aren't blocked
+ * waiting for an approval no one is there to give.
+ */
+export function createBatchTerminal(prompt: string, out: (text: string) => void = (t) => void process.stdout.write(t)): Terminal {
+  let atLineStart = true;
+  const write = (text: string) => {
+    if (text === "") return;
+    out(text.replace(/\x1b\[[0-9;]*m/g, ""));
+    atLineStart = text.endsWith("\n");
+  };
+  const endLine = () => {
+    if (!atLineStart) write("\n");
+  };
+  async function* once(): AsyncGenerator<string> {
+    yield prompt;
+  }
+  return {
+    screen: false,
+    write,
+    endLine,
+    activity() {},
+    status() {},
+    notes() {},
+    async ask() {
+      return ""; // unattended mode approves before asking, so this is never reached in practice
+    },
+    lines: () => once(),
+    ready() {},
+    onInterrupt(handler) {
+      process.on("SIGINT", handler);
+      process.on("SIGTERM", handler);
+    },
+    onBusyInput: undefined,
+    inputText: () => "",
+    setInput() {},
+    close() {},
+  };
+}
+
 /** The original readline REPL: output scrolls, the prompt follows it, and dots show while waiting. */
 export function createLineTerminal(opts: TerminalOptions): Terminal {
   const tty = Boolean(process.stdin.isTTY && process.stdout.isTTY);
