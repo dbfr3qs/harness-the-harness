@@ -13,9 +13,10 @@ export interface Settings {
   models?: Partial<Record<Provider, string>>; // the starting model for each provider
   showThinking?: boolean;
   maxTurns?: number; // Infinity for unlimited ("unlimited" in the file)
+  maxTokens?: number; // max_tokens per response
 }
 
-const KEYS = new Set(["provider", "models", "showThinking", "maxTurns"]);
+const KEYS = new Set(["provider", "models", "showThinking", "maxTurns", "maxTokens"]);
 
 /** Checks parsed JSON and returns Settings, or throws ConfigError naming the problem. */
 export function parseSettings(json: unknown, source: string): Settings {
@@ -55,6 +56,11 @@ export function parseSettings(json: unknown, source: string): Settings {
     else if (typeof t === "number" && Number.isSafeInteger(t) && t >= 1) out.maxTurns = t;
     else fail('"maxTurns" must be a whole number of 1 or more, or "unlimited"');
   }
+  if (raw.maxTokens !== undefined) {
+    const t = raw.maxTokens;
+    if (typeof t === "number" && Number.isSafeInteger(t) && t >= 1) out.maxTokens = t;
+    else fail('"maxTokens" must be a whole number of 1 or more');
+  }
   return out;
 }
 
@@ -85,6 +91,7 @@ export function formatSettings(s: Settings): string {
   }
   if (s.showThinking !== undefined) out.showThinking = s.showThinking;
   if (s.maxTurns !== undefined) out.maxTurns = Number.isFinite(s.maxTurns) ? s.maxTurns : "unlimited";
+  if (s.maxTokens !== undefined) out.maxTokens = s.maxTokens;
   return `${JSON.stringify(out, null, 2)}\n`;
 }
 

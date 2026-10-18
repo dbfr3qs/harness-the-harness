@@ -10,8 +10,8 @@ export interface ProviderInfo {
   defaultModel: string;
   // Offered by /model. With `strict`, these are the only IDs accepted: DeepSeek silently maps
   // unknown names to another model, so a typo would run (and bill) a model you didn't ask for.
-  // contextWindow, where known in advance; Anthropic's is looked up from its models API instead.
-  models: readonly { id: string; note?: string; contextWindow?: number }[];
+  // contextWindow and maxOutput, where known in advance; Anthropic's are looked up from its models API.
+  models: readonly { id: string; note?: string; contextWindow?: number; maxOutput?: number }[];
   strict: boolean;
 }
 
@@ -36,9 +36,9 @@ export const PROVIDERS: Record<Provider, ProviderInfo> = {
     baseUrl: "https://api.deepseek.com/anthropic",
     defaultModel: "deepseek-flash",
     models: [
-      // 1M-token context for both, per api-docs.deepseek.com/quick_start/pricing.
-      { id: "deepseek-flash", note: "default", contextWindow: 1_000_000 },
-      { id: "deepseek-v4-pro", note: "larger, pricier", contextWindow: 1_000_000 },
+      // 1M-token context and 384K max output for both, per api-docs.deepseek.com/quick_start/pricing.
+      { id: "deepseek-flash", note: "default", contextWindow: 1_000_000, maxOutput: 384_000 },
+      { id: "deepseek-v4-pro", note: "larger, pricier", contextWindow: 1_000_000, maxOutput: 384_000 },
     ],
     strict: true,
   },
@@ -65,6 +65,8 @@ export interface Config {
 }
 
 export class ConfigError extends Error {}
+
+export const DEFAULT_MAX_TOKENS = 4096;
 
 function positiveInt(env: NodeJS.ProcessEnv, name: string, fallback: number, min = 1): number {
   const raw = env[name];
@@ -183,7 +185,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env, saved: Settings
   return {
     ...settings,
     secrets,
-    maxTokens: positiveInt(env, "MAX_TOKENS", 4096),
+    maxTokens: positiveInt(env, "MAX_TOKENS", saved.maxTokens ?? DEFAULT_MAX_TOKENS),
     maxTurns: maxTurns(env, saved.maxTurns ?? 10),
     timeoutMs: positiveInt(env, "TIMEOUT_MS", 120_000),
     maxRetries: positiveInt(env, "MAX_RETRIES", 3, 0),

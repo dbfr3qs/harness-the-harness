@@ -69,7 +69,8 @@ The screen needs a terminal for both input and output. With piped input or outpu
 | `/model`   | Switch model within the current provider from a menu; `/model <id>` switches directly |
 | `/turns`   | Show the model-call limit per message; `/turns <n>` or `/turns unlimited` changes it for the session |
 | `/context` | Show how full the context window is (see [Context meter](#context-meter)) |
-| `/defaults` | Show what the harness starts with; `/defaults save` keeps this session's provider, models, thinking and turns, `/defaults clear` removes them (see [Saved defaults](#saved-defaults)) |
+| `/maxtokens` | Show the most the model may write per response; `/maxtokens <n>` (e.g. `16k`) changes it for the session |
+| `/defaults` | Show what the harness starts with; `/defaults save` keeps this session's provider, models, thinking, turns and max tokens, `/defaults clear` removes them (see [Saved defaults](#saved-defaults)) |
 | `/thinking` | Show or hide the model's thinking: `/thinking on`, `/thinking off` (see [Seeing the model's thinking](#seeing-the-models-thinking)) |
 
 Press Tab to complete commands and their arguments (provider names, the current provider's models, `/policy` subcommands and existing rule patterns); press it twice to list the options. A line that starts with an unknown `/word` is reported as an unknown command rather than sent to the model; paths such as `/etc/hosts` still go through.
@@ -78,8 +79,9 @@ Responses stream by default: text appears as the model writes it, and an animate
 
 Each tool call is shown as a dim line as it runs (`→ read_file src/agent.ts`), with a `✗` line under it if the tool returned an error, so a long run of tool calls is never a silent wait. The model's thinking is hidden unless you turn it on with `/thinking on`.
 
-After each answer the REPL prints that exchange's token totals, the number of model calls and the number of tool calls, e.g. `[tokens: 9413 in + 42240 cached, 5951 out · 8 model call(s) · 19 tool call(s)]`. "Cached" is input the provider served from its prompt cache (DeepSeek caches automatically); it is still input the model read, just billed at a lower rate. If the loop stops early, it says why: `MAX_TURNS` reached while the model was still calling tools, `MAX_TOKENS` cut-off, or a refusal. After `MAX_TURNS`, send another message and the model continues where it left off; `/turns <n>` raises the limit first if it needs more room.
+After each answer the REPL prints that exchange's token totals, the number of model calls and the number of tool calls, e.g. `[tokens: 9413 in + 42240 cached, 5951 out · 8 model call(s) · 19 tool call(s)]`. "Cached" is input the provider served from its prompt cache (DeepSeek caches automatically); it is still input the model read, just billed at a lower rate. If the loop stops early, it says why: `MAX_TURNS` reached while the model was still calling tools, the max tokens cut-off, or a refusal. After `MAX_TURNS`, send another message and the model continues where it left off; `/turns <n>` raises the limit first if it needs more room.
 
+**Max tokens** (`max_tokens`, default 4,096) is the most the model may write in one response, and its thinking counts toward it, so models that think by default (DeepSeek, Claude 5) can reach it sooner than the visible answer suggests. When a response is cut off, raise it with `/maxtokens <n>` (`16000`, `16,000` or `16k`) and send "continue". The harness knows each model's ceiling (from Anthropic's models API, or DeepSeek's published 384K) and refuses values above it; if `MAX_TOKENS` or a saved value is above the current model's ceiling, it's lowered to the ceiling, with a note.
 
 ### Context meter
 
@@ -152,11 +154,11 @@ Models may skip thinking on simple requests, so not every answer has any.
 
 ## Saved defaults
 
-The harness starts with the provider, model, thinking and turn settings saved in `harness.json` in the project root. Set things up the way you like during a session, then:
+The harness starts with the provider, model, thinking, turns and max tokens settings saved in `harness.json` in the project root. Set things up the way you like during a session, then:
 
 ```
 /defaults          show what the next start will use, and where each setting comes from
-/defaults save     save this session's provider, models, thinking and turns
+/defaults save     save this session's provider, models, thinking, turns and max tokens
 /defaults clear    delete harness.json; the built-in defaults apply again
 ```
 
@@ -165,12 +167,13 @@ The harness starts with the provider, model, thinking and turn settings saved in
   "provider": "deepseek",
   "models": { "anthropic": "claude-haiku-5-5", "deepseek": "deepseek-v4-pro" },
   "showThinking": true,
-  "maxTurns": "unlimited"
+  "maxTurns": "unlimited",
+  "maxTokens": 16000
 }
 ```
 
 - **One model per provider** is saved: the one in use, plus the one you last used with the other provider this session (or the one already saved), so `/provider` switches to it as well.
-- **Environment variables win.** For each setting, the order is: environment variable (`PROVIDER`, `MODEL`, `SHOW_THINKING`, `MAX_TURNS`, from `.env` or your shell), then `harness.json`, then the built-in default. `/defaults` shows which one decides each setting, and `/defaults save` warns if an environment variable will still win over what you saved.
+- **Environment variables win.** For each setting, the order is: environment variable (`PROVIDER`, `MODEL`, `SHOW_THINKING`, `MAX_TURNS`, `MAX_TOKENS`, from `.env` or your shell), then `harness.json`, then the built-in default. `/defaults` shows which one decides each setting, and `/defaults save` warns if an environment variable will still win over what you saved.
 - **No keys.** The file only holds the settings above; keys stay in `.env`. Anything else in it is an error at startup, as is an invalid value (such as a DeepSeek model that doesn't exist), so a typo can't silently change what runs.
 - **Private.** `harness.json` is gitignored, and the model's file tools can't read it.
 - Set `HARNESS_SETTINGS` to keep the file somewhere else.
@@ -185,7 +188,7 @@ The harness starts with the provider, model, thinking and turn settings saved in
 | `MODEL`                 | per provider                      | `claude-sonnet-5-5` or `deepseek-flash` (`claude-haiku-5-5` is cheaper for testing) |
 | `BASE_URL`              | per provider                      | `https://api.anthropic.com` or `https://api.deepseek.com/anthropic` |
 | `ANTHROPIC_MODEL`, `ANTHROPIC_BASE_URL` | none              | Older names for `MODEL` and `BASE_URL`; used only with `PROVIDER=anthropic`, and `MODEL`/`BASE_URL` win |
-| `MAX_TOKENS`            | `4096`                            | `max_tokens` per request |
+| `MAX_TOKENS`            | `4096`                            | `max_tokens` per request (thinking included); `/maxtokens` changes it for the session |
 | `MAX_TURNS`             | `10`                              | Model calls per user message, or `unlimited`; `/turns` changes it for the session |
 | `TIMEOUT_MS`            | `120000`                          | Idle timeout: the longest wait for the next piece of a response (the whole response when not streaming) |
 | `MAX_RETRIES`           | `3`                               | Retries on network errors, timeouts, 429, 500 and 529 (and overloaded errors mid-stream, until text has been shown) |

@@ -1,4 +1,4 @@
-import { PROVIDER_NAMES, PROVIDERS, startProvider } from "./config.ts";
+import { DEFAULT_MAX_TOKENS, PROVIDER_NAMES, PROVIDERS, startProvider } from "./config.ts";
 import type { Provider } from "./config.ts";
 import { clearSettings, saveSettings } from "./settings.ts";
 import type { Settings } from "./settings.ts";
@@ -9,6 +9,7 @@ export interface SessionSettings {
   model: string;
   showThinking: boolean;
   maxTurns: number;
+  maxTokens: number;
 }
 
 export interface DefaultsCommandContext {
@@ -26,7 +27,7 @@ export interface DefaultsCommandResult {
 
 export const DEFAULTS_HELP = [
   "/defaults         show what the harness starts with, and where each setting comes from",
-  "/defaults save    make this session's provider, models, thinking and turns the defaults",
+  "/defaults save    make this session's provider, models, thinking, turns and max tokens the defaults",
   "/defaults clear   remove the saved defaults (built-in defaults apply again)",
 ].join("\n");
 
@@ -42,12 +43,19 @@ export async function runDefaultsCommand(args: string, ctx: DefaultsCommandConte
         const models: Partial<Record<Provider, string>> = { ...ctx.saved.models };
         for (const [p, m] of ctx.lastModel) models[p] = m;
         models[current.provider] = current.model;
-        const next: Settings = { provider: current.provider, models, showThinking: current.showThinking, maxTurns: current.maxTurns };
+        const next: Settings = {
+          provider: current.provider,
+          models,
+          showThinking: current.showThinking,
+          maxTurns: current.maxTurns,
+          maxTokens: current.maxTokens,
+        };
         await saveSettings(ctx.path, next);
         const others = PROVIDER_NAMES.filter((p) => p !== current.provider && models[p]).map((p) => `${p}: ${models[p]}`);
         const lines = [
           `Saved to ${ctx.path}: ${current.provider} / ${current.model}${others.length ? ` (${others.join(", ")})` : ""} · ` +
-            `thinking ${current.showThinking ? "on" : "off"} · turns ${describeTurns(current.maxTurns)}.`,
+            `thinking ${current.showThinking ? "on" : "off"} · turns ${describeTurns(current.maxTurns)} · ` +
+            `max tokens ${current.maxTokens.toLocaleString("en-US")}.`,
           ...overriddenBy({ env: ctx.env, saved: next }).map((o) => `Note: ${o}, which still wins over ${ctx.path} at startup.`),
         ];
         return { output: lines.join("\n"), saved: next };
@@ -56,7 +64,7 @@ export async function runDefaultsCommand(args: string, ctx: DefaultsCommandConte
         await clearSettings(ctx.path);
         const built = PROVIDERS.anthropic;
         return {
-          output: `Removed ${ctx.path}. Next start: anthropic / ${built.defaultModel} · thinking off · turns 10, unless the environment says otherwise.`,
+          output: `Removed ${ctx.path}. Next start: anthropic / ${built.defaultModel} · thinking off · turns 10 · max tokens ${DEFAULT_MAX_TOKENS.toLocaleString("en-US")}, unless the environment says otherwise.`,
           saved: {},
         };
       }
@@ -100,6 +108,12 @@ function resolve(ctx: Pick<DefaultsCommandContext, "env" | "saved">) {
     models,
     thinking: pick("SHOW_THINKING", env.SHOW_THINKING, onOff(saved.showThinking), "off"),
     turns: pick("MAX_TURNS", turnsText(env.MAX_TURNS), saved.maxTurns === undefined ? undefined : describeTurns(saved.maxTurns), describeTurns(10)),
+    maxTokens: pick(
+      "MAX_TOKENS",
+      /^\d+$/.test(env.MAX_TOKENS?.trim() ?? "") ? Number(env.MAX_TOKENS).toLocaleString("en-US") : env.MAX_TOKENS,
+      saved.maxTokens?.toLocaleString("en-US"),
+      DEFAULT_MAX_TOKENS.toLocaleString("en-US"),
+    ),
   };
 }
 
@@ -119,16 +133,16 @@ function label(r: Resolved, path: string): string {
 // Environment variables that decide a setting the file also holds.
 function overriddenBy(ctx: Pick<DefaultsCommandContext, "env" | "saved">): string[] {
   const r = resolve(ctx);
-  return [r.provider, ...Object.values(r.models), r.thinking, r.turns]
+  return [r.provider, ...Object.values(r.models), r.thinking, r.turns, r.maxTokens]
     .filter((x) => x.source === "environment" && x.overrides !== undefined)
     .map((x) => `${x.envName} is set in the environment (.env or your shell)`);
 }
 
 export function describeDefaults(ctx: DefaultsCommandContext): string {
   const r = resolve(ctx);
-  const values = [r.provider.value, ...PROVIDER_NAMES.map((p) => `${p}: ${r.models[p].value}`), r.thinking.value, r.turns.value];
+  const values = [r.provider.value, ...PROVIDER_NAMES.map((p) => `${p}: ${r.models[p].value}`), r.thinking.value, r.turns.value, r.maxTokens.value];
   const col = Math.max(...values.map((v) => v.length)) + 3;
-  const row = (name: string, value: string, from: string) => `  ${name.padEnd(10)}${value.padEnd(col)}${from}`;
+  const row = (name: string, value: string, from: string) => `  ${name.padEnd(12)}${value.padEnd(col)}${from}`;
   const c = ctx.current;
   return [
     `Defaults for the next start (${Object.keys(ctx.saved).length ? `saved in ${ctx.path}` : `nothing saved; ${ctx.path} does not exist`}):`,
@@ -136,7 +150,8 @@ export function describeDefaults(ctx: DefaultsCommandContext): string {
     ...PROVIDER_NAMES.map((p) => row(p === PROVIDER_NAMES[0] ? "model" : "", `${p}: ${r.models[p].value}`, label(r.models[p], ctx.path))),
     row("thinking", r.thinking.value, label(r.thinking, ctx.path)),
     row("turns", r.turns.value, label(r.turns, ctx.path)),
-    `This session: ${c.provider} / ${c.model} · thinking ${c.showThinking ? "on" : "off"} · turns ${describeTurns(c.maxTurns)}`,
+    row("max tokens", r.maxTokens.value, label(r.maxTokens, ctx.path)),
+    `This session: ${c.provider} / ${c.model} · thinking ${c.showThinking ? "on" : "off"} · turns ${describeTurns(c.maxTurns)} · max tokens ${c.maxTokens.toLocaleString("en-US")}`,
     "/defaults save makes this session's settings the defaults; /defaults clear removes them.",
   ].join("\n");
 }

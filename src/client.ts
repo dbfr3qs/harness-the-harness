@@ -205,27 +205,33 @@ export function createAnthropicClient(
   };
 }
 
+export interface ModelLimits {
+  contextWindow?: number; // max input tokens
+  maxOutput?: number; // the most max_tokens can be
+}
+
 /**
- * The model's context window (max input tokens) from the provider's models API, or undefined if
- * it can't be found. Only Anthropic serves one. Never throws, and never retries: the meter can
- * do without it.
+ * The model's limits from the provider's models API; a limit that can't be found is left out.
+ * Only Anthropic serves one. Never throws, and never retries: the harness can do without them.
  */
-export async function fetchContextWindow(
+export async function fetchModelLimits(
   config: Pick<Config, "provider" | "apiKey" | "baseUrl" | "model">,
   deps: { fetch?: typeof fetch } = {},
-): Promise<number | undefined> {
-  if (config.provider !== "anthropic") return undefined;
+): Promise<ModelLimits> {
+  if (config.provider !== "anthropic") return {};
   try {
     const res = await (deps.fetch ?? fetch)(`${config.baseUrl}/v1/models/${encodeURIComponent(config.model)}`, {
       headers: { "x-api-key": config.apiKey, "anthropic-version": "2023-06-01" },
       signal: AbortSignal.timeout(10_000),
     });
-    if (!res.ok) return undefined;
-    const body = (await res.json()) as { max_input_tokens?: unknown };
-    const n = body.max_input_tokens;
-    return typeof n === "number" && Number.isSafeInteger(n) && n > 0 ? n : undefined;
+    if (!res.ok) return {};
+    const body = (await res.json()) as { max_input_tokens?: unknown; max_tokens?: unknown };
+    const count = (n: unknown) => (typeof n === "number" && Number.isSafeInteger(n) && n > 0 ? n : undefined);
+    const contextWindow = count(body.max_input_tokens);
+    const maxOutput = count(body.max_tokens);
+    return { ...(contextWindow ? { contextWindow } : {}), ...(maxOutput ? { maxOutput } : {}) };
   } catch {
-    return undefined;
+    return {};
   }
 }
 

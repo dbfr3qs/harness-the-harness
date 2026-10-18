@@ -50,6 +50,8 @@ test("a missing file means no saved settings; broken or invalid ones are errors 
     [{ showThinking: "yes" }, /"showThinking" must be true or false/],
     [{ maxTurns: 0 }, /"maxTurns" must be a whole number of 1 or more, or "unlimited"/],
     [{ maxTurns: "lots" }, /"maxTurns" must be a whole number/],
+    [{ maxTokens: 0 }, /"maxTokens" must be a whole number of 1 or more/],
+    [{ maxTokens: "16k" }, /"maxTokens" must be a whole number of 1 or more/],
   ];
   for (const [json, pattern] of cases) {
     assert.throws(() => parseSettings(json, "h.json"), (e: Error) => /^h\.json: /.test(e.message) && pattern.test(e.message), JSON.stringify(json));
@@ -59,10 +61,11 @@ test("a missing file means no saved settings; broken or invalid ones are errors 
 // --- precedence -----------------------------------------------------------------
 
 test("saved settings set the starting provider, model, thinking and turns", () => {
-  const c = loadConfig(keys, { provider: "deepseek", models: { deepseek: "deepseek-v4-pro" }, showThinking: true, maxTurns: Infinity });
-  assert.deepEqual([c.provider, c.model, c.showThinking, c.maxTurns], ["deepseek", "deepseek-v4-pro", true, Infinity]);
+  const c = loadConfig(keys, { provider: "deepseek", models: { deepseek: "deepseek-v4-pro" }, showThinking: true, maxTurns: Infinity, maxTokens: 32_000 });
+  assert.deepEqual([c.provider, c.model, c.showThinking, c.maxTurns, c.maxTokens], ["deepseek", "deepseek-v4-pro", true, Infinity, 32_000]);
   const defaults = loadConfig(keys, {});
-  assert.deepEqual([defaults.provider, defaults.model, defaults.showThinking, defaults.maxTurns], ["anthropic", "claude-sonnet-5-5", false, 10]);
+  assert.deepEqual([defaults.provider, defaults.model, defaults.showThinking, defaults.maxTurns, defaults.maxTokens], ["anthropic", "claude-sonnet-5-5", false, 10, 4096]);
+  assert.equal(loadConfig({ ...keys, MAX_TOKENS: "8000" }, { maxTokens: 32_000 }).maxTokens, 8000, "MAX_TOKENS wins over the file");
 });
 
 test("environment variables win over saved settings", () => {
@@ -103,7 +106,7 @@ function ctx(env: NodeJS.ProcessEnv = keys, saved = {}): DefaultsCommandContext 
     env,
     path: join(dir, `h${++n}.json`),
     saved,
-    current: { provider: "deepseek", model: "deepseek-v4-pro", showThinking: true, maxTurns: Infinity },
+    current: { provider: "deepseek", model: "deepseek-v4-pro", showThinking: true, maxTurns: Infinity, maxTokens: 32_000 },
     lastModel: new Map<Provider, string>([["anthropic", "claude-haiku-5-5"]]),
   };
 }
@@ -112,20 +115,27 @@ test("/defaults shows each starting value and where it comes from", async () => 
   const c = ctx({ ...keys, MAX_TURNS: "20" }, { provider: "deepseek", maxTurns: 40 });
   const out = (await runDefaultsCommand("", c)).output;
   assert.match(out, /^Defaults for the next start \(saved in .*h\d+\.json\):/);
-  assert.match(out, /\n  provider  deepseek +.*h\d+\.json\n/);
-  assert.match(out, /\n  model     anthropic: claude-sonnet-5-5 +built-in\n/);
-  assert.match(out, /\n            deepseek: deepseek-flash +built-in\n/);
-  assert.match(out, /\n  thinking  off +built-in\n/);
-  assert.match(out, /\n  turns     20 model call\(s\) +MAX_TURNS in the environment \(overrides "40 model call\(s\)" in .*\)\n/);
-  assert.match(out, /\nThis session: deepseek \/ deepseek-v4-pro · thinking on · turns unlimited\n/);
+  assert.match(out, /\n  provider +deepseek +.*h\d+\.json\n/);
+  assert.match(out, /\n  model +anthropic: claude-sonnet-5-5 +built-in\n/);
+  assert.match(out, /\n +deepseek: deepseek-flash +built-in\n/);
+  assert.match(out, /\n  thinking +off +built-in\n/);
+  assert.match(out, /\n  turns +20 model call\(s\) +MAX_TURNS in the environment \(overrides "40 model call\(s\)" in .*\)\n/);
+  assert.match(out, /\n  max tokens +4,096 +built-in\n/);
+  assert.match(out, /\nThis session: deepseek \/ deepseek-v4-pro · thinking on · turns unlimited · max tokens 32,000\n/);
   assert.match((await runDefaultsCommand("", ctx())).output, /nothing saved; .* does not exist/);
 });
 
 test("/defaults save writes this session's settings, keeping other providers' models", async () => {
   const c = ctx(keys, { models: { anthropic: "claude-opus-5-5" } });
   const r = await runDefaultsCommand("save", c);
-  assert.equal(r.output, `Saved to ${c.path}: deepseek / deepseek-v4-pro (anthropic: claude-haiku-5-5) · thinking on · turns unlimited.`);
-  assert.deepEqual(r.saved, { provider: "deepseek", models: { anthropic: "claude-haiku-5-5", deepseek: "deepseek-v4-pro" }, showThinking: true, maxTurns: Infinity });
+  assert.equal(r.output, `Saved to ${c.path}: deepseek / deepseek-v4-pro (anthropic: claude-haiku-5-5) · thinking on · turns unlimited · max tokens 32,000.`);
+  assert.deepEqual(r.saved, {
+    provider: "deepseek",
+    models: { anthropic: "claude-haiku-5-5", deepseek: "deepseek-v4-pro" },
+    showThinking: true,
+    maxTurns: Infinity,
+    maxTokens: 32_000,
+  });
   assert.deepEqual(await loadSettings(c.path), r.saved);
   assert.deepEqual((await readdir(dir)).filter((f) => f.includes(".tmp-")), [], "no temp file left");
   assert.doesNotMatch(await readFile(c.path, "utf8"), /sk-/, "no keys in the file");

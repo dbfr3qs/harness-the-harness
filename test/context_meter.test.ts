@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { fetchContextWindow } from "../src/client.ts";
+import { fetchModelLimits } from "../src/client.ts";
 import { loadConfig } from "../src/config.ts";
 import { contextAfter, contextBar, contextSummary, describeContext, formatTokens } from "../src/context_meter.ts";
 import type { MessageResponse } from "../src/types.ts";
@@ -40,7 +40,7 @@ test("/context reports used, window, what's left, and warns when nearly full", (
   assert.match(describeContext({ used: 5000, window: 1_000_000, stale: "measured with x" }, "m", 2), /\n  Approximate: measured with x\.$/);
 });
 
-test("the window comes from Anthropic's models API; failures and other providers give undefined", async () => {
+test("limits come from Anthropic's models API; failures and other providers give none", async () => {
   const calls: string[] = [];
   const reply = (status: number, body: unknown) =>
     (async (url: string, init: RequestInit) => {
@@ -48,15 +48,18 @@ test("the window comes from Anthropic's models API; failures and other providers
       return new Response(JSON.stringify(body), { status });
     }) as unknown as typeof fetch;
   const cfg = { provider: "anthropic" as const, apiKey: "K", baseUrl: "https://api.test", model: "claude-haiku-5-5" };
-  assert.equal(await fetchContextWindow(cfg, { fetch: reply(200, { max_input_tokens: 1_000_000 }) }), 1_000_000);
+  assert.deepEqual(await fetchModelLimits(cfg, { fetch: reply(200, { max_input_tokens: 1_000_000, max_tokens: 128_000 }) }), {
+    contextWindow: 1_000_000,
+    maxOutput: 128_000,
+  });
   assert.equal(calls[0], "https://api.test/v1/models/claude-haiku-5-5 K");
-  assert.equal(await fetchContextWindow(cfg, { fetch: reply(404, { error: {} }) }), undefined);
-  assert.equal(await fetchContextWindow(cfg, { fetch: reply(200, { max_input_tokens: "lots" }) }), undefined);
+  assert.deepEqual(await fetchModelLimits(cfg, { fetch: reply(404, { error: {} }) }), {});
+  assert.deepEqual(await fetchModelLimits(cfg, { fetch: reply(200, { max_input_tokens: "lots", max_tokens: 64_000 }) }), { maxOutput: 64_000 });
   const broken = (async () => {
     throw new Error("offline");
   }) as unknown as typeof fetch;
-  assert.equal(await fetchContextWindow(cfg, { fetch: broken }), undefined);
-  assert.equal(await fetchContextWindow({ ...cfg, provider: "deepseek" }, { fetch: reply(200, { max_input_tokens: 5 }) }), undefined);
+  assert.deepEqual(await fetchModelLimits(cfg, { fetch: broken }), {});
+  assert.deepEqual(await fetchModelLimits({ ...cfg, provider: "deepseek" }, { fetch: reply(200, { max_input_tokens: 5 }) }), {});
 });
 
 test("CONTEXT_WINDOW overrides the window when set", () => {

@@ -1,7 +1,9 @@
 import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
 import { runAgent } from "./agent.ts";
 import type { AgentResult } from "./agent.ts";
-import { createAnthropicClient, fetchContextWindow, returnsThinkingOnRequest } from "./client.ts";
+import { createAnthropicClient, fetchModelLimits, returnsThinkingOnRequest } from "./client.ts";
+import type { ModelLimits } from "./client.ts";
+import { runMaxTokensCommand } from "./max_tokens_command.ts";
 import { contextAfter, contextSummary, describeContext, fullWarning, WARN_AT } from "./context_meter.ts";
 import type { ContextReading } from "./context_meter.ts";
 import type { ClientHooks } from "./client.ts";
@@ -93,7 +95,7 @@ function stopNotice(result: AgentResult, config: Config): string | undefined {
       return `[stopped: reached MAX_TURNS (${describeTurns(config.maxTurns)}) while the model was still calling tools, before it gave an answer. ` +
         "Send another message to let it continue, ask it to summarise what it found, or raise the limit with /turns <n>]";
     case "max_tokens":
-      return `[stopped: the response hit MAX_TOKENS (${config.maxTokens}) and was cut off]`;
+      return `[stopped: the response hit max tokens (${config.maxTokens.toLocaleString("en-US")}) and was cut off; raise it with /maxtokens <n> (thinking counts toward it), then send "continue"]`;
     case "refusal":
       return "[stopped: the model declined to respond]";
     case "interrupted":
@@ -321,25 +323,37 @@ async function main(): Promise<void> {
   const messages: Message[] = [];
   const lastModel = new Map<Provider, string>(); // per provider, for /provider switching back
 
-  const windows = new Map<string, Promise<number | undefined>>(); // looked up once per model
-  const contextWindow = (): Promise<number | undefined> => {
-    if (config.contextWindow) return Promise.resolve(config.contextWindow);
-    const known = PROVIDERS[config.provider].models.find((m) => m.id === config.model)?.contextWindow;
-    if (known) return Promise.resolve(known);
+  // The model's limits (context window, most it can write): known, or looked up once per model.
+  const limitsCache = new Map<string, Promise<ModelLimits>>();
+  const modelLimits = (): Promise<ModelLimits> => {
     const key = `${config.provider}/${config.model}`;
-    let window = windows.get(key);
-    if (!window) {
-      window = fetchContextWindow(config);
-      windows.set(key, window);
+    let limits = limitsCache.get(key);
+    if (!limits) {
+      const known = PROVIDERS[config.provider].models.find((m) => m.id === config.model);
+      limits = known?.contextWindow || known?.maxOutput
+        ? Promise.resolve({ contextWindow: known.contextWindow, maxOutput: known.maxOutput })
+        : fetchModelLimits(config);
+      limitsCache.set(key, limits);
     }
-    return window;
+    return limits;
+  };
+  const contextWindow = async (): Promise<number | undefined> => config.contextWindow ?? (await modelLimits()).contextWindow;
+  let maxOutputNow: number | undefined;
+  // A max_tokens above what the model can write would make every request fail, so it's lowered.
+  const applyLimits = (limits: ModelLimits) => {
+    maxOutputNow = limits.maxOutput;
+    windowNow = config.contextWindow ?? limits.contextWindow;
+    if (limits.maxOutput && config.maxTokens > limits.maxOutput) {
+      say(dim(`(max tokens lowered from ${config.maxTokens.toLocaleString("en-US")} to ${limits.maxOutput.toLocaleString("en-US")}, the most ${config.model} can write)`));
+      config = { ...config, maxTokens: limits.maxOutput };
+      model = createAnthropicClient(config, clientHooks);
+    }
+    updateStatus();
   };
   const refreshWindow = () => {
     const key = `${config.provider}/${config.model}`;
-    void contextWindow().then((w) => {
-      if (key !== `${config.provider}/${config.model}`) return; // switched again meanwhile
-      windowNow = w;
-      updateStatus();
+    void modelLimits().then((limits) => {
+      if (key === `${config.provider}/${config.model}`) applyLimits(limits); // unless switched again meanwhile
     });
   };
   refreshWindow();
@@ -386,7 +400,7 @@ async function main(): Promise<void> {
   });
 
   say(
-    `harness · ${config.provider} / ${config.model} · ${registry.definitions().length} tool(s) · ${config.stream ? "streaming" : "non-streaming"} · /exit /reset /history /policy /provider /model /thinking /turns /defaults /context`,
+    `harness · ${config.provider} / ${config.model} · ${registry.definitions().length} tool(s) · ${config.stream ? "streaming" : "non-streaming"} · /exit /reset /history /policy /provider /model /thinking /turns /maxtokens /defaults /context`,
   );
   say(`transcript: ${transcript.path}`);
   say(
@@ -536,12 +550,26 @@ async function main(): Promise<void> {
           model: config.model,
           showThinking: config.showThinking,
           maxTurns: config.maxTurns,
+          maxTokens: config.maxTokens,
         },
         lastModel,
       });
       if (result.saved) {
         savedSettings = result.saved;
         transcript.log("session", { defaults: formatSettings(savedSettings).trim() });
+      }
+      say(result.output);
+      term.ready();
+      continue;
+    }
+    const maxTokensCmd = /^\/maxtokens(?:\s+(.*))?$/.exec(input);
+    if (maxTokensCmd) {
+      applyLimits(await modelLimits()); // so the model's ceiling is known and applied
+      const result = runMaxTokensCommand(maxTokensCmd[1] ?? "", config.maxTokens, config.model, maxOutputNow);
+      if (result.maxTokens !== undefined) {
+        config = { ...config, maxTokens: result.maxTokens };
+        model = createAnthropicClient(config, clientHooks);
+        transcript.log("session", { maxTokens: config.maxTokens });
       }
       say(result.output);
       term.ready();
