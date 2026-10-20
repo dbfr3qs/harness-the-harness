@@ -161,3 +161,46 @@ test("a malformed schema becomes an error result instead of throwing", async () 
   assert.equal(out.isError, true);
   assert.match(out.content, /^Error: /);
 });
+
+const readFile = defineTool({
+  name: "read_file",
+  description: "Built-in.",
+  input_schema: { type: "object", properties: {} },
+  handler: async () => "original",
+});
+const added = defineTool({
+  name: "added",
+  description: "Added at runtime.",
+  input_schema: { type: "object", properties: {} },
+  handler: async () => "from added",
+});
+
+test("add makes a tool dispatchable and listed", async () => {
+  const registry = createRegistry([readFile]);
+  registry.add(added);
+  assert.equal(registry.has("added"), true);
+  assert.deepEqual(registry.definitions().map((d) => d.name), ["read_file", "added"]);
+  const out = await registry.dispatch("added", {});
+  assert.equal(out.isError, false);
+  assert.equal(out.content, "from added");
+});
+
+test("add refuses a name that collides with a built-in or an added tool", async () => {
+  const registry = createRegistry([readFile]);
+  registry.add(added);
+  assert.throws(() => registry.add({ ...added, name: "read_file", handler: async () => "shadow" }), /read_file/);
+  assert.throws(() => registry.add(added), /added/);
+  const out = await registry.dispatch("read_file", {});
+  assert.equal(out.content, "original");
+});
+
+test("remove drops an added tool but refuses a built-in", async () => {
+  const registry = createRegistry([readFile]);
+  registry.add(added);
+  assert.throws(() => registry.remove("read_file"), /read_file/);
+  registry.remove("added");
+  assert.equal(registry.has("added"), false);
+  assert.equal((await registry.dispatch("added", {})).isError, true);
+  registry.remove("never-added");
+  assert.equal(registry.has("read_file"), true);
+});
