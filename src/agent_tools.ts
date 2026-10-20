@@ -20,10 +20,13 @@ export interface ToolDeps {
  * run programs or write files.
  */
 export function assembleTools(deps: ToolDeps): Tool[] {
+  // In unattended mode run_shell can already read the whole filesystem, so confining the read-only
+  // file tools to the workspace adds no safety and only wastes turns — let them reach outside it.
+  const confined = !deps.unattended;
   const tools: Tool[] = [
     getTimeTool,
-    createListDirTool(deps.workspaceRoot, deps.privatePaths),
-    createReadFileTool(deps.workspaceRoot, deps.privatePaths),
+    createListDirTool(deps.workspaceRoot, deps.privatePaths, confined),
+    createReadFileTool(deps.workspaceRoot, deps.privatePaths, confined),
     deps.webFetch,
   ];
   if (deps.unattended) {

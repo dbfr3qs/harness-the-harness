@@ -80,3 +80,21 @@ test("rejects symlinks that escape, to a file or through a directory", async () 
 test("missing paths get an instructive not-found error", async () => {
   await assert.rejects(resolveInWorkspace(root, "nope.txt"), /"nope.txt" does not exist. Use list_dir/);
 });
+
+// Unconfined mode (confined = false): used in unattended runs, where run_shell can already read the
+// whole filesystem, so confining the read-only file tools to the workspace only wastes turns. The
+// geometric "outside the workspace" rejections are dropped; real-path resolution and not-found stay.
+test("unconfined resolves .. traversal and absolute paths outside the root", async () => {
+  assert.equal(await resolveInWorkspace(root, "../outside/secret.txt", false), join(base, "outside", "secret.txt"));
+  assert.equal(await resolveInWorkspace(root, join(base, "outside", "secret.txt"), false), join(base, "outside", "secret.txt"));
+  assert.equal(await resolveInWorkspace(root, "../root-sibling/x.txt", false), join(base, "root-sibling", "x.txt"));
+});
+
+test("unconfined follows symlinks that escape the root", async () => {
+  assert.equal(await resolveInWorkspace(root, "link-out", false), join(base, "outside", "secret.txt"));
+  assert.equal(await resolveInWorkspace(root, "linkdir-out/secret.txt", false), join(base, "outside", "secret.txt"));
+});
+
+test("unconfined still reports missing paths", async () => {
+  await assert.rejects(resolveInWorkspace(root, "../outside/nope.txt", false), /does not exist/);
+});

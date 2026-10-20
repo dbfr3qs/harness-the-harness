@@ -7,16 +7,19 @@ function isInside(root: string, target: string): boolean {
 }
 
 /**
- * Resolves `p` against the workspace root and returns its real path, rejecting anything that
- * lands outside the root: `..` traversal, absolute paths elsewhere, and symlinks that escape.
- * Errors are written for the model to read, so they say what to do instead.
+ * Resolves `p` against the workspace root and returns its real path. When `confined` (the default),
+ * anything landing outside the root is rejected: `..` traversal, absolute paths elsewhere, and
+ * symlinks that escape. When `confined` is false — unattended mode, where run_shell can already
+ * reach the whole filesystem, so confinement only wastes turns — those geometric checks are
+ * dropped and any readable path resolves; the not-found error is kept. Errors are written for the
+ * model to read, so they say what to do instead.
  */
-export async function resolveInWorkspace(root: string, p: string): Promise<string> {
+export async function resolveInWorkspace(root: string, p: string, confined = true): Promise<string> {
   const realRoot = await realpath(resolve(root));
   const target = resolve(realRoot, p);
   const outside = `path "${p}" is outside the workspace. Use a path relative to the workspace root, such as "." or "src".`;
 
-  if (!isInside(realRoot, target)) throw new Error(outside);
+  if (confined && !isInside(realRoot, target)) throw new Error(outside);
 
   let real: string;
   try {
@@ -28,6 +31,6 @@ export async function resolveInWorkspace(root: string, p: string): Promise<strin
     throw err;
   }
 
-  if (!isInside(realRoot, real)) throw new Error(outside);
+  if (confined && !isInside(realRoot, real)) throw new Error(outside);
   return real;
 }

@@ -7,19 +7,25 @@ import { resolveInWorkspace } from "./workspace.ts";
 
 export const MAX_ENTRIES = 200;
 
-export function createListDirTool(root: string, privatePaths: PrivatePath[] = []) {
+export function createListDirTool(root: string, privatePaths: PrivatePath[] = [], confined = true) {
   const privacy = createPrivacyCheck(root, privatePaths);
+  const scope = confined ? "inside the workspace" : "anywhere on the filesystem";
   return defineTool({
     name: "list_dir",
     description:
-      "List the entries of a directory inside the workspace. Use it to discover which files exist before reading them. " +
+      `List the entries of a directory ${scope}. Use it to discover which files exist before reading them. ` +
       `Returns one name per line, sorted, with a trailing "/" on directories; at most ${MAX_ENTRIES} entries are shown, ` +
-      "and a note says how many were left out. Private directories (.git and the harness's transcripts) are not listed, " +
-      "and paths outside the workspace are refused.",
+      "and a note says how many were left out. Private directories (.git and the harness's transcripts) are not listed" +
+      (confined ? ", and paths outside the workspace are refused." : "."),
     input_schema: {
       type: "object",
       properties: {
-        path: { type: "string", description: 'Directory path relative to the workspace root. Defaults to ".".' },
+        path: {
+          type: "string",
+          description: confined
+            ? 'Directory path relative to the workspace root. Defaults to ".".'
+            : 'Absolute directory path, or one relative to the workspace root. Defaults to ".".',
+        },
       },
     },
     handler: async (input) => {
@@ -28,7 +34,7 @@ export function createListDirTool(root: string, privatePaths: PrivatePath[] = []
         new Error(`"${p}" is off limits: ${why}. The harness keeps it private, so list_dir will not list it. Do not try other paths to it.`);
       const givenWhy = await privacy.reason(resolve(root, p));
       if (givenWhy) throw privateRefusal(givenWhy);
-      const dir = await resolveInWorkspace(root, p);
+      const dir = await resolveInWorkspace(root, p, confined);
       const realWhy = await privacy.reason(dir);
       if (realWhy) throw privateRefusal(realWhy);
       if (!(await stat(dir)).isDirectory()) {

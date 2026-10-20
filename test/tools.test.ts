@@ -170,6 +170,49 @@ test(".git and the transcript directory can't be read or listed, however the pat
   }
 });
 
+// --- unconfined (unattended) file tools -------------------------------------
+
+test("unconfined read_file and list_dir reach outside the workspace but still refuse .env and private paths", async () => {
+  const base = await realpath(await mkdtemp(join(tmpdir(), "harness-unconfined-")));
+  try {
+    const ws = join(base, "workspace");
+    await mkdir(ws);
+    await mkdir(join(base, "src"));
+    await writeFile(join(base, "src", "target.c"), "int main(){}\n");
+    await writeFile(join(base, "src", ".env"), "TOKEN=SECRET\n");
+    await writeFile(join(base, ".env.prod"), "KEY=SECRET\n");
+    await mkdir(join(base, "logs"));
+    await writeFile(join(base, "logs", "t.jsonl"), '{"data":"PAST CONVERSATION"}');
+
+    const privatePaths = [{ path: join(base, "logs"), name: `${join(base, "logs")}/`, holds: "conversation transcripts" }];
+    const reg = createRegistry([createListDirTool(ws, privatePaths, false), createReadFileTool(ws, privatePaths, false)]);
+
+    // Reads source outside the workspace, relative and absolute.
+    assert.deepEqual(await reg.dispatch("read_file", { path: "../src/target.c" }), { content: "int main(){}\n", isError: false });
+    assert.deepEqual(await reg.dispatch("read_file", { path: join(base, "src", "target.c") }), { content: "int main(){}\n", isError: false });
+    // Lists a directory outside the workspace.
+    assert.deepEqual(await reg.dispatch("list_dir", { path: "../src" }), { content: ".env\ntarget.c", isError: false });
+
+    // Still refuses .env anywhere and the transcript directory, even outside the workspace.
+    for (const path of ["../src/.env", join(base, "src", ".env"), "../.env.prod"]) {
+      const out = await reg.dispatch("read_file", { path });
+      assert.equal(out.isError, true, path);
+      assert.ok(!out.content.includes("SECRET"), `secret leaked for ${path}`);
+    }
+    const t = await reg.dispatch("read_file", { path: join(base, "logs", "t.jsonl") });
+    assert.equal(t.isError, true);
+    assert.ok(!t.content.includes("PAST CONVERSATION"));
+  } finally {
+    await rm(base, { recursive: true, force: true });
+  }
+});
+
+test("confined read_file (the default) still refuses paths outside the workspace", async () => {
+  const out = await registry.dispatch("read_file", { path: "../../etc/passwd" });
+  assert.equal(out.isError, true);
+  assert.match(out.content, /outside the workspace/);
+});
+
 test("names that only resemble .git are readable", async () => {
   await writeFile(join(root, ".gitignore"), "node_modules/\n");
   await writeFile(join(root, "my.git"), "fine");
