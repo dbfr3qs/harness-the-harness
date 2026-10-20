@@ -183,6 +183,23 @@ test("max_tokens with no tool calls stops with max_tokens", async () => {
   assert.equal(out.finalText, "A very long ans");
 });
 
+test("continueOnMaxTokens: a cut-off reply with no tool call continues instead of stopping", async () => {
+  const { model, requests } = fakeModel([
+    reply([text("A very long ans")], "max_tokens"), // truncated mid-sentence, no tool call
+    reply([text("wer, now complete.")]), // the continuation runs to end_turn
+  ]);
+  const messages = [user("go")];
+  const out = await run(model, messages, { continueOnMaxTokens: true });
+  assert.equal(out.stopReason, "done");
+  assert.equal(out.turns, 2);
+  assert.equal(out.finalText, "wer, now complete.");
+  // A "continue" user message was injected between the two assistant turns...
+  assert.deepEqual(messages.map((m) => m.role), ["user", "assistant", "user", "assistant"]);
+  // ...and the second model call saw it as the last message.
+  const lastUser = requests[1]!.messages.at(-1);
+  assert.ok(lastUser && lastUser.role === "user");
+});
+
 test("refusal stops with refusal", async () => {
   const { model } = fakeModel([reply([], "refusal")]);
   const out = await run(model, [user("go")]);

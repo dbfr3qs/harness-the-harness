@@ -32,6 +32,10 @@ const CUT_OFF_MESSAGE =
   "Error: this tool call was not run because your response hit the max_tokens limit and its input may be incomplete. " +
   "Call the tool again with a shorter response.";
 
+const CONTINUE_MESSAGE =
+  "Your previous response was cut off because it reached the max_tokens limit. " +
+  "Continue from exactly where you left off.";
+
 export async function runAgent(opts: {
   model: ModelFn;
   registry: Registry;
@@ -46,8 +50,12 @@ export async function runAgent(opts: {
   // Messages the user sent while the run was going. Called before each model call; anything
   // returned joins the last user message, so the model sees it at its next step.
   takeUserInput?: () => string[];
+  // When a response with no tool call is cut off at max_tokens, continue it (inject a "continue"
+  // user message and keep going) instead of stopping. For unattended/batch runs, where there is no
+  // user to resume it; the turn still counts toward maxTurns, so the run stays bounded.
+  continueOnMaxTokens?: boolean;
 }): Promise<AgentResult> {
-  const { model, registry, system, messages, maxTurns, maxToolOutputChars, hooks = {}, signal } = opts;
+  const { model, registry, system, messages, maxTurns, maxToolOutputChars, hooks = {}, signal, continueOnMaxTokens } = opts;
   const tools = registry.definitions();
   const usage: Usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
   let turns = 0;
@@ -87,7 +95,13 @@ export async function runAgent(opts: {
 
     const calls = res.content.filter(isToolUse);
     if (calls.length === 0) {
-      if (res.stop_reason === "max_tokens") return finish("max_tokens");
+      if (res.stop_reason === "max_tokens") {
+        if (continueOnMaxTokens) {
+          appendUserText(messages, [CONTINUE_MESSAGE]);
+          continue;
+        }
+        return finish("max_tokens");
+      }
       if (res.stop_reason === "refusal") return finish("refusal");
       return finish("done");
     }

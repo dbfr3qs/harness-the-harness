@@ -678,6 +678,9 @@ async function main(): Promise<void> {
         maxToolOutputChars: config.maxToolOutputChars,
         hooks,
         signal: running.signal,
+        // In unattended/batch runs there's no user to resume a cut-off reply, so continue it
+        // automatically rather than ending the run at a max_tokens stop.
+        continueOnMaxTokens: config.unattended,
         takeUserInput: () => {
           const texts = pendingInput.splice(0);
           delivered.push(...texts);
