@@ -28,6 +28,9 @@ import { assembleTools } from "./agent_tools.ts";
 import type { PrivatePath } from "./tools/private_paths.ts";
 import { createWebFetchTool } from "./tools/web_fetch.ts";
 import { loadWebPolicy } from "./tools/web_policy.ts";
+import { loadMcpConfig, serversToStart } from "./mcp/config.ts";
+import type { McpServerConfig } from "./mcp/config.ts";
+import { startMcpServers } from "./mcp/start.ts";
 import type { CompiledPolicy } from "./tools/web_policy.ts";
 import type { AgentHooks } from "./agent.ts";
 import { addUserText } from "./history.ts";
@@ -147,6 +150,14 @@ async function main(): Promise<void> {
   let webPolicy: CompiledPolicy | undefined;
   try {
     webPolicy = await loadWebPolicy(config.webPolicyPath, config.webPolicyRequired);
+  } catch (err) {
+    console.error(`Config error: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+
+  let mcpServers: McpServerConfig[];
+  try {
+    mcpServers = await loadMcpConfig(config.mcpConfigPath, config.mcpConfigRequired);
   } catch (err) {
     console.error(`Config error: ${err instanceof Error ? err.message : String(err)}`);
     process.exit(1);
@@ -322,6 +333,23 @@ async function main(): Promise<void> {
     return allowed;
   };
 
+  // Tools of an MCP server marked "interactive" ask before every call in normal mode, since the
+  // server can do whatever its program can. "a" approves that tool for the rest of the session.
+  const approvedMcpTools = new Set<string>();
+  const confirmMcp = async (tool: string, input: Record<string, unknown>, signal: AbortSignal): Promise<boolean> => {
+    if (approvedMcpTools.has(tool)) return true;
+    activity("waiting for your approval");
+    endThinking();
+    const answer = (await term.ask(`  Allow ${oneLine(`${tool} ${JSON.stringify(input)}`, 300)}?\n  [y]es / [n]o / [a]lways for ${tool}: `, signal))
+      .trim()
+      .toLowerCase();
+    activity(`running ${tool}`);
+    const allowed = ["y", "yes", "a", "always"].includes(answer);
+    if (answer === "a" || answer === "always") approvedMcpTools.add(tool);
+    transcript.log("tool_call", { approval: { tool, answer, allowed } });
+    return allowed;
+  };
+
   const policyStore = createPolicyStore(config.webPolicyPath, webPolicy);
   completionState = () => ({
     models: PROVIDERS[config.provider].models.map((m) => m.id),
@@ -340,9 +368,19 @@ async function main(): Promise<void> {
     ...transcriptPrivatePaths(config),
     { path: resolve(settingsPath), name: settingsPath, holds: "the harness's saved settings" },
     { path: resolve(config.webPolicyPath), name: config.webPolicyPath, holds: "the web_fetch site policy" },
+    { path: resolve(config.mcpConfigPath), name: config.mcpConfigPath, holds: "the MCP server config" },
   ];
+  // Only servers this mode may start (see serversToStart); API keys never reach them.
+  const starting = serversToStart(mcpServers, config.unattended);
+  if (starting.length) say(dim(`starting MCP server(s): ${starting.map((s) => s.name).join(", ")}…`));
+  const mcp = await startMcpServers(starting, {
+    hiddenEnv: Object.keys(process.env).filter((k) => config.secrets.includes(process.env[k] ?? "")),
+    ...(config.unattended ? {} : { confirm: confirmMcp }),
+  });
+  for (const w of mcp.warnings) transcript.log("error", { message: w });
+  const systemPrompt = SYSTEM_PROMPT + mcp.systemPrompt;
   const registry = createRegistry(
-    assembleTools({ workspaceRoot: config.workspaceRoot, privatePaths, webFetch, unattended: config.unattended }),
+    assembleTools({ workspaceRoot: config.workspaceRoot, privatePaths, webFetch, unattended: config.unattended, mcpTools: mcp.tools }),
   );
   const messages: Message[] = [];
   const lastModel = new Map<Provider, string>(); // per provider, for /provider switching back
@@ -395,6 +433,7 @@ async function main(): Promise<void> {
     term.endLine();
     term.write("Bye.\n");
     term.close();
+    mcp.close();
     void transcript.flush().finally(() => process.exit(0));
   };
   // Ctrl+C: during a run, the first press stops the run and a second quits (in case it doesn't
@@ -432,6 +471,10 @@ async function main(): Promise<void> {
       ? `web policy: ${config.webPolicyPath} (${webPolicy.policy.rules.length} rule(s), default ${webPolicy.policy.default}) · /policy to view or change`
       : "web policy: none (web_fetch asks before every fetch) · /policy to set one",
   );
+  for (const note of mcp.notes) say(note);
+  for (const w of mcp.warnings) say(`⚠ ${w}`);
+  const skippedServers = mcpServers.length - starting.length;
+  if (skippedServers) say(dim(`(${skippedServers} MCP server(s) in ${config.mcpConfigPath} start only with --unattended, or with "interactive": true)`));
   if (term.screen) say(dim("Type while the model works: your message reaches it at its next step. Ctrl+C stops a run."));
   if (config.unattended) {
     say(
@@ -672,7 +715,7 @@ async function main(): Promise<void> {
       const result = await runAgent({
         model,
         registry,
-        system: SYSTEM_PROMPT,
+        system: systemPrompt,
         messages,
         maxTurns: config.maxTurns,
         maxToolOutputChars: config.maxToolOutputChars,
@@ -747,6 +790,7 @@ async function main(): Promise<void> {
   }
 
   term.close();
+  mcp.close();
   await transcript.flush();
   console.log("Bye.");
 }

@@ -1,0 +1,22 @@
+{
+  "mcpServers": {
+    "rea": {
+      "command": "npx",
+      "args": ["-y", "rea-agents@6.4.0", "mcp"],
+      "env": {
+        "GHIDRA_INSTALL_DIR": "/path/to/ghidra",
+        "GHIDRA_HEADLESS_MAXMEM": "8G"
+      },
+      "tools": [
+        "open_binary", "close_binary", "binary_overview", "list_architectures", "list_segments",
+        "list_procedures", "search_procedures", "procedure_*", "xrefs", "find_xrefs_to_name",
+        "list_strings", "search_strings", "read_bytes", "batch_decompile", "analyze_function",
+        "set_address_name", "set_comment", "inspect_artifact", "inspect_binary_layout",
+        "analyze_javascript_application", "inspect_analysis_view",
+        "inspect_managed_artifact", "inspect_managed_members"
+      ],
+      "startupTimeoutMs": 300000,
+      "callTimeoutMs": 3600000
+    }
+  }
+}

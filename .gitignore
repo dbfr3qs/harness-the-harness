@@ -3,3 +3,4 @@ transcripts/
 .env
 harness.json
 web-policy.json
+mcp.json

@@ -69,3 +69,12 @@ test("every key in the environment is listed for transcript scrubbing", () => {
   assert.deepEqual(loadConfig({ ANTHROPIC_API_KEY: A, DEEPSEEK_API_KEY: D }).secrets, [A, D]);
   assert.deepEqual(loadConfig({ PROVIDER: "deepseek", DEEPSEEK_API_KEY: D }).secrets, [D]);
 });
+
+test("the MCP config defaults to mcp.json and is required only when MCP_CONFIG names it", () => {
+  const c = loadConfig({ ANTHROPIC_API_KEY: A });
+  assert.equal(c.mcpConfigPath, "mcp.json");
+  assert.equal(c.mcpConfigRequired, false);
+  const named = loadConfig({ ANTHROPIC_API_KEY: A, MCP_CONFIG: "/etc/harness/mcp.json" });
+  assert.equal(named.mcpConfigPath, "/etc/harness/mcp.json");
+  assert.equal(named.mcpConfigRequired, true);
+});

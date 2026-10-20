@@ -198,6 +198,7 @@ The harness starts with the provider, model, thinking, turns and max tokens sett
 | `SHOW_THINKING`         | `false`                           | Start with the model's thinking shown (same as `/thinking on`) |
 | `WEB_POLICY`            | `web-policy.json`                 | Site policy for `web_fetch` (see below). If set explicitly, the file must exist |
 | `HARNESS_SETTINGS`      | `harness.json`                    | Saved defaults file (see [Saved defaults](#saved-defaults)) |
+| `MCP_CONFIG`            | `mcp.json`                        | MCP servers to start (see [MCP servers](#mcp-servers)). If set explicitly, the file must exist |
 | `CONTEXT_WINDOW`        | per model                         | Context window size for the meter, for models whose window isn't known |
 | `MAX_TOOL_OUTPUT_CHARS` | `8000`                            | Tool results longer than this are truncated with a visible marker |
 | `WORKSPACE_ROOT`        | current directory                 | Sandbox root for the file tools |
@@ -221,7 +222,7 @@ Some paths are private: neither tool reads or lists them, by any path or symlink
 
 - **`.git/`** (at any depth): the repository's internals, including your name and email in `.git/config`.
 - **The transcript directory** (`transcripts/` by default; wherever `TRANSCRIPT_PATH` points). Transcripts hold whole past conversations, and without this a model could read conversations held with another provider. If `TRANSCRIPT_PATH` puts transcripts directly in the workspace root, only the current transcript file is private.
-- **Settings files**: `harness.json` (wherever `HARNESS_SETTINGS` points) and the web policy file (`web-policy.json`, or wherever `WEB_POLICY` points). The tool description already tells the model what the policy allows.
+- **Settings files**: `harness.json` (wherever `HARNESS_SETTINGS` points), the web policy file (`web-policy.json`, or wherever `WEB_POLICY` points) and the MCP config (`mcp.json`, or wherever `MCP_CONFIG` points). The tool description already tells the model what the policy allows.
 
 **In the normal harness the model can't change any file.** No tool writes, deletes or runs anything; the only code that writes is the transcript logger and `/defaults save`, `/defaults clear` and `/policy save`, which run only when you type them. Slash commands are recognised only in what you type, never in model output. `test/boundaries.test.ts` fails if anything directly under `src/tools/` gains a write or execute API, or if any tool imports the code that saves settings, so such a tool can't be added to the normal set by accident (the spec requires the owner's approval for one). The two tools that can write and run programs live in `src/tools/unattended/` and are added only in [unattended mode](#unattended-mode); the same test proves they never appear in the normal tool set.
 
@@ -326,6 +327,40 @@ An allowlist limits *where* requests go, not what they carry. An allowed site th
 
 **Safety of the file:** a policy file that exists but is invalid (bad JSON, unknown settings or actions, malformed patterns) stops the REPL at startup with an error, rather than running without a policy. Each decision is logged in the transcript with the rule that matched. The REPL banner shows which policy is in effect.
 
+## MCP servers
+
+The harness can use the tools of [MCP](https://modelcontextprotocol.io) servers that run locally over stdio, such as [REA](https://github.com/morluto/rea) for reverse engineering. List them in `mcp.json` (gitignored; copy `mcp.example.json`). The format is Claude Code's `mcpServers`, so an entry from `claude mcp get <name>` or `~/.claude.json` can be copied across, plus a few harness keys:
+
+```json
+{
+  "mcpServers": {
+    "rea": {
+      "command": "npx",
+      "args": ["-y", "rea-agents@6.4.0", "mcp"],
+      "env": { "GHIDRA_INSTALL_DIR": "/path/to/ghidra" },
+      "tools": ["open_binary", "close_binary", "binary_overview", "procedure_*", "xrefs", "search_strings"],
+      "callTimeoutMs": 3600000
+    }
+  }
+}
+```
+
+| Key | Default | Purpose |
+| --- | ------- | ------- |
+| `command`, `args`, `env` | (`command` required) | The program to start. `env` is added to the harness's environment; the provider API keys are always removed from it |
+| `type` | `stdio` | Only `stdio` is supported |
+| `tools` | every tool | Allowlist: exact tool names, or `prefix*` |
+| `interactive` | `false` | Also start the server in normal mode, asking before each call (see below) |
+| `startupTimeoutMs` | `120000` | For the process to start and list its tools (`npx` may download the package first) |
+| `callTimeoutMs` | `600000` | For one call; past it the call is cancelled and the model gets an error |
+
+- **Tools are named `<server>__<tool>`** (`rea__open_binary`), so they can't collide with the built-in tools or each other. Schemas go to the API exactly as the server wrote them. Each server's instructions are added to the system prompt.
+- **Use an allowlist for large servers.** Every tool definition is sent with every request. REA offers 170 tools, about 110k tokens of definitions; the list above, from `mcp.example.json`, is about 10k. At startup the harness prints each server's tool count and cost, and warns about allowlist patterns that matched nothing.
+- **Only in unattended mode, by default.** A server is a program the harness starts, and its tools can do anything that program can (REA can install Android packages and drive browsers, for example). So servers start only with `--unattended`. A server marked `"interactive": true` also starts in normal mode, where every call asks `[y]es / [n]o / [a]lways for <tool>` first; `test/boundaries.test.ts` checks that no other server starts in normal mode.
+- **Failures don't stop the harness.** A server that fails to start is reported with its last stderr output, and the harness runs without its tools. A server that exits mid-call fails that call, and each later call, with an error. Ctrl+C cancels a running call (the server is sent `notifications/cancelled`).
+
+Results are converted to text: text parts are joined, and images and binary resources are described rather than sent. Like any tool result, they're truncated at `MAX_TOOL_OUTPUT_CHARS`. REA's Evidence can be large, so raise it for reverse-engineering work.
+
 ## Adding a new tool
 
 1. Create `src/tools/<name>.ts` and export a tool built with `defineTool`. If it needs config such as the workspace root, export a factory function instead (see `list_dir.ts`).
@@ -396,6 +431,7 @@ src/
   context_meter.ts context usage, formatting and /context
   defaults_command.ts /defaults
   turns_command.ts /turns
+  mcp/            MCP servers: config.ts (mcp.json), client.ts (stdio JSON-RPC), tools.ts (as harness tools), start.ts
   tools/          workspace sandboxing, private paths, get_time, list_dir, read_file, web_fetch, web_policy
     unattended/   run_shell and write_file (added only in unattended mode)
 test/             unit tests (fake model, fake fetch, temp dirs)

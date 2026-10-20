@@ -11,6 +11,7 @@ export interface ToolDeps {
   privatePaths: PrivatePath[];
   webFetch: Tool; // built in the REPL, which owns the approval prompt and the site policy
   unattended: boolean; // adds the shell and file-writing tools; only safe inside a sandbox
+  mcpTools?: Tool[]; // from the MCP servers this mode may start (see serversToStart in src/mcp/config.ts)
 }
 
 /**
@@ -32,5 +33,6 @@ export function assembleTools(deps: ToolDeps): Tool[] {
   if (deps.unattended) {
     tools.push(createRunShellTool(deps.workspaceRoot), createWriteFileTool(deps.workspaceRoot, deps.privatePaths));
   }
+  tools.push(...(deps.mcpTools ?? []));
   return tools;
 }

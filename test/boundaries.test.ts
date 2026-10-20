@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { readdir, readFile } from "node:fs/promises";
 import { assembleTools } from "../src/agent_tools.ts";
 import type { Tool } from "../src/registry.ts";
+import { parseMcpConfig, serversToStart } from "../src/mcp/config.ts";
 
 // The model acts only through tools, so src/tools/ is the boundary of what it can do. The
 // read-only tools live directly in src/tools/ and may never write files or run programs. The two
@@ -64,4 +65,18 @@ test("run_shell and write_file are absent from the normal tool set", () => {
 test("unattended mode adds run_shell and write_file, and nothing else", () => {
   const names = build(true);
   assert.deepEqual(names, ["get_time", "list_dir", "read_file", "web_fetch", "run_shell", "write_file"]);
+});
+
+// MCP servers are programs the harness starts, so their tools can do anything those programs can.
+// Normal mode starts only servers marked "interactive" (and asks before each call, in src/repl.ts);
+// the rest start only in unattended mode.
+test("normal mode starts no MCP server unless it is marked interactive", () => {
+  const servers = parseMcpConfig({ mcpServers: { rea: { command: "rea" }, docs: { command: "docs", interactive: true } } }, "mcp.json");
+  assert.deepEqual(serversToStart(servers, false).map((s) => s.name), ["docs"]);
+});
+
+test("MCP tools come after the built-in tools", () => {
+  const mcpTool: Tool = { ...stubWebFetch, name: "rea__open_binary" };
+  const names = assembleTools({ workspaceRoot: "/tmp", privatePaths: [], webFetch: stubWebFetch, unattended: true, mcpTools: [mcpTool] }).map((t) => t.name);
+  assert.deepEqual(names, ["get_time", "list_dir", "read_file", "web_fetch", "run_shell", "write_file", "rea__open_binary"]);
 });
