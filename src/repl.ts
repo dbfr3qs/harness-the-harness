@@ -468,8 +468,8 @@ async function main(): Promise<void> {
   let running: AbortController | undefined; // set while a message is being answered
   let runFinishedAt = 0; // when the last run ended without an interrupt
   let quitArmed = false;
-  // On the way out, remind the user of library changes they never folded into the saved library:
-  // started/loaded/toggled this session, so lost next session unless persisted with /library.
+  // On the way out, remind the user of new library installs not yet folded into the saved library:
+  // they are lost next session unless persisted with /library.
   const unpersistedLibraryAlert = (): string | undefined => {
     if (!librarySession) return undefined;
     const d = librarySession.diff();

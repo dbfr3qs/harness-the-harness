@@ -4,7 +4,6 @@ import { createLibraryTools } from "../src/tools/unattended/library.ts";
 import type { LibrarySession } from "../src/library/session.ts";
 import type { McpServerConfig } from "../src/mcp/config.ts";
 import type { ArtifactKind } from "../src/library/manifest.ts";
-import type { SkillInfo } from "../src/library/skills.ts";
 
 // The model touches the library only through these tools, so each test drives a tool's handler
 // against a fake session and checks it dispatches to the matching session method with the right
@@ -15,12 +14,11 @@ interface Calls {
   addServer: McpServerConfig[];
   addDescriptions: (string | undefined)[];
   setEnabled: { kind: ArtifactKind; name: string; enabled: boolean }[];
-  listSkills: number;
   readSkill: string[];
 }
 
 function fakeSession(overrides: Partial<LibrarySession> = {}): { session: LibrarySession; calls: Calls } {
-  const calls: Calls = { reloadTools: 0, addServer: [], addDescriptions: [], setEnabled: [], listSkills: 0, readSkill: [] };
+  const calls: Calls = { reloadTools: 0, addServer: [], addDescriptions: [], setEnabled: [], readSkill: [] };
   const base: LibrarySession = {
     toolsDir: "/home/u/.harness/library/tools",
     async reloadTools() {
@@ -35,10 +33,6 @@ function fakeSession(overrides: Partial<LibrarySession> = {}): { session: Librar
     async setEnabled(kind, name, enabled) {
       calls.setEnabled.push({ kind, name, enabled });
       return `${enabled ? "Enabled" : "Disabled"} ${kind} "${name}".`;
-    },
-    listSkills() {
-      calls.listSkills++;
-      return [{ name: "writing", description: "how to write", dir: "/s/writing" }] satisfies SkillInfo[];
     },
     async readSkill(name) {
       calls.readSkill.push(name);

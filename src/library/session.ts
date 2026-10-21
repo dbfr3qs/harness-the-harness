@@ -4,7 +4,7 @@ import type { Tool } from "../registry.ts";
 import type { McpServerConfig } from "../mcp/config.ts";
 import type { StartedServer } from "../mcp/start.ts";
 import { loadToolFile, scanToolsDir, type ToolFactoryDeps } from "./loader.ts";
-import { readSkill, scanSkillsDir, type SkillInfo } from "./skills.ts";
+import { readSkill } from "./skills.ts";
 import { saveManifest, type ArtifactKind, type Manifest, type ManifestEntry } from "./manifest.ts";
 import type { LibraryPaths } from "./paths.ts";
 
@@ -25,7 +25,6 @@ export interface LibrarySession {
   addServer(server: McpServerConfig, description?: string): Promise<{ tools: string[]; instructions?: string }>;
   /** Session-only enable/disable. Returns a human-readable line. */
   setEnabled(kind: ArtifactKind, name: string, enabled: boolean): Promise<string>;
-  listSkills(): SkillInfo[];
   readSkill(name: string): Promise<string>;
   inventory(): { kind: ArtifactKind; name: string; enabled: boolean; persisted: boolean; description?: string }[];
   diff(): { added: { kind: ArtifactKind; name: string }[] };
@@ -226,13 +225,6 @@ export async function createLibrarySession(deps: LibrarySessionDeps): Promise<Li
       if (!rec) throw new Error(`No skill "${name}" in the library.`);
       rec.enabled = enabled;
       return `${enabled ? "Enabled" : "Disabled"} skill "${name}".`;
-    },
-
-    listSkills() {
-      return [...skills.entries()]
-        .filter(([, rec]) => rec.enabled)
-        .map(([name, rec]) => ({ name, description: rec.description, dir: join(paths.skillsDir, name) }))
-        .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
     },
 
     readSkill(name) {
