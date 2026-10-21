@@ -327,6 +327,67 @@ An allowlist limits *where* requests go, not what they carry. An allowed site th
 
 **Safety of the file:** a policy file that exists but is invalid (bad JSON, unknown settings or actions, malformed patterns) stops the REPL at startup with an error, rather than running without a policy. Each decision is logged in the transcript with the rule that matched. The REPL banner shows which policy is in effect.
 
+### Extending the harness at runtime
+
+In unattended mode the model can give itself new capabilities mid-task: write a tool, read a skill, or start an MCP server, then use it straight away. This is **unattended mode only.** These tools load code and start programs, so none of them exist in the normal harness; `test/boundaries.test.ts` proves the normal tool set is unchanged.
+
+**The library** is a directory separate from the workspace, so the model's own work and its saved capabilities don't mix. It is `HARNESS_LIBRARY_ROOT`, default `~/.harness/library`:
+
+```
+~/.harness/library/
+  manifest.json          what is saved: tools, skills and MCP servers, each enabled or not
+  tools/<name>.ts        native tools
+  skills/<name>/SKILL.md written how-tos the model can read
+```
+
+There are two layers, and only a person can change the lower one:
+
+- **The session overlay.** The model's changes (loading a tool, starting a server, enabling or disabling something) apply to the current session only and vanish when it ends.
+- **The persisted library.** At startup the harness loads what `manifest.json` lists. Only you change it, with `/library persist`. **The model has no persist tool.** If you quit with unpersisted changes, the harness prints an alert saying they will be gone next session.
+
+Changing the tool set rewrites the tool definitions, which resets the prompt cache, so the next turn costs more. The tool results tell the model to reload once, not after each edit.
+
+**Model tools:**
+
+| Tool | Does |
+| ---- | ---- |
+| `reload_tools` | Rescans the library's `tools/` directory and (re)loads every tool file into the session; reports which loaded and which failed, with the reason |
+| `add_mcp_server` | Starts an MCP server (`name`, `command`, optional `args` and `env`) for this session and registers its tools. The description tells the model to prefer a reputable existing server (a Ghidra MCP, say) over building its own for anything substantial |
+| `set_artifact_enabled` | Enables or disables one tool, skill or MCP server (`kind`, `name`, `enabled`) for this session |
+| `list_skills` | Lists the available skills, one line each |
+| `use_skill` | Returns a skill's `SKILL.md` by name |
+
+**Your commands:**
+
+```
+/tools                    list the library's tools and whether each is loaded
+/tools enable|disable <name>
+/skills [enable|disable <name>]   list skills, or flip whether one is offered
+/mcp [enable|disable <name>]      list MCP servers, or start/stop one
+/library                  show this session's unpersisted changes (added, enabled/disabled)
+/library persist          show them, ask [y/n], then write them to manifest.json
+```
+
+The lists mark each item `persisted` or `session-only`. `/library persist` is the only path that writes the manifest, and it saves every change shown. The commands exist only in unattended mode; in normal mode they are unknown commands. Persisting a tool copies its file into the library's `tools/` directory.
+
+**The tool-file contract.** A native tool is a `.ts` file directly in the library's `tools/` directory whose default export is a factory `(deps) => Tool`. It imports **no harness code**: everything it needs arrives in `deps`, which has `defineTool`, `workspaceRoot` (the workspace path) and `privatePaths` (paths the file tools must not touch).
+
+```ts
+export default (deps) =>
+  deps.defineTool({
+    name: "word_count", // letters, digits, _ and -, up to 128
+    description: "Count the words in a piece of text. Returns the number.",
+    input_schema: {
+      type: "object",
+      properties: { text: { type: "string", description: "The text to count" } },
+      required: ["text"],
+    },
+    handler: async (input) => String((input.text as string).split(/\s+/).filter(Boolean).length),
+  });
+```
+
+A file that is missing the default export, exports something that isn't a function, or returns an invalid tool is reported by `reload_tools` with a message saying how to fix it, and doesn't stop the other files loading. Tool files run with the harness's full permissions, as `run_shell` does, so the sandbox remains the boundary.
+
 ## MCP servers
 
 The harness can use the tools of [MCP](https://modelcontextprotocol.io) servers that run locally over stdio, such as [REA](https://github.com/morluto/rea) for reverse engineering. List them in `mcp.json` (gitignored; copy `mcp.example.json`). The format is Claude Code's `mcpServers`, so an entry from `claude mcp get <name>` or `~/.claude.json` can be copied across, plus a few harness keys:
