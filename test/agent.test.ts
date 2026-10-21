@@ -346,3 +346,38 @@ test("a message typed before the first model call joins the prompt", async () =>
   await run(model, [user("go")], { takeUserInput: () => ["and be brief"] });
   assert.deepEqual(requests[0]!.messages, [{ role: "user", content: [{ type: "text", text: "go" }, { type: "text", text: "and be brief" }] }]);
 });
+
+test("a tool added mid-run is callable later in the same run", async () => {
+  let ran = false;
+  const newTool = defineTool({
+    name: "fresh",
+    description: "Added mid-run.",
+    input_schema: { type: "object", properties: {} },
+    handler: async () => {
+      ran = true;
+      return "fresh ok";
+    },
+  });
+  const reg = createRegistry([]);
+  reg.add(
+    defineTool({
+      name: "adder",
+      description: "Adds the fresh tool.",
+      input_schema: { type: "object", properties: {} },
+      handler: async () => {
+        reg.add(newTool);
+        return "added";
+      },
+    }),
+  );
+  const { model, requests } = fakeModel([
+    reply([toolUse("adder", {})]),
+    reply([toolUse("fresh", {})]),
+    reply([text("done")]),
+  ]);
+  const out = await run(model, [user("go")], { registry: reg });
+  assert.equal(ran, true, "fresh handler ran");
+  assert.equal(out.stopReason, "done");
+  assert.ok(!requests[0]!.tools.some((t) => t.name === "fresh"));
+  assert.ok(requests[1]!.tools.some((t) => t.name === "fresh"));
+});
