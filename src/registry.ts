@@ -16,7 +16,7 @@ export interface ToolOutcome {
   isError: boolean;
 }
 
-const NAME_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
+export const NAME_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
 
 export function defineTool(tool: Tool): Tool {
   return tool;
