@@ -474,6 +474,27 @@ Each REPL session appends one JSON object per line to `TRANSCRIPT_PATH`:
 
 `kind` is one of `request`, `response`, `tool_call`, `tool_result`, `error` or `session` (a `/provider` or `/model` switch). Request bodies and full responses (including `usage`) are logged; headers and the API key never are. If logging fails, the REPL prints one warning and carries on.
 
+## Restartable sessions
+
+Every REPL session has a UUID. The harness saves it to `sessions/<uuid>.json` after each completed run and again when you quit, so a session can pick up where it left off. A session that never completed a run writes nothing.
+
+When you quit, the harness prints the command to resume it:
+
+```
+Resume this session: npm start -- --resume <uuid>  (saved to sessions/<uuid>.json)
+```
+
+Resume with `npm start -- --resume <uuid>`, `--resume=<uuid>`, or the `HARNESS_RESUME` environment variable (the flag wins). `SESSIONS_DIR` moves the sessions directory. A resumed session restores:
+
+- **The conversation**, with its message history.
+- **The settings**: provider, model, thinking shown, turn cap, max tokens and context window. For these the saved session wins over the environment and `harness.json`; the API key and base URL still come from the environment.
+- **The web policy**, including `/policy` edits that were not saved to the policy file.
+- **In unattended mode**, the loaded tools, MCP servers and skills. The servers are relaunched. A session resumes in the mode it was saved in: an unattended session resumes unattended, and a normal one resumes normal.
+
+Restore is best effort. If a tool file is missing or has changed, or an MCP server won't relaunch, the harness warns, restores everything else, and tells the model which tools are unavailable.
+
+**Secrets.** The provider API key is never written to a session file. An MCP server's `env` is stored, as the library manifest already stores it. That is why session files are written mode `0600`, are git-ignored, and are neither readable nor writable by the model's file tools (`sessions/` is a private path, like the transcripts).
+
 ## Layout
 
 ```
@@ -487,6 +508,7 @@ src/
   agent.ts        runAgent(): the loop
   log.ts          JSONL transcript writer
   repl.ts         CLI entry point
+  session_store.ts saved sessions: the UUID, save and load (0600, atomic), private paths
   spinner.ts      waiting animation
   terminal.ts     the Terminal interface, and the line-by-line REPL
   screen.ts       the screen: input box, status bar, line editor, menus and questions in the panel
