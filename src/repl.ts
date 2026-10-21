@@ -473,7 +473,7 @@ async function main(): Promise<void> {
   const unpersistedLibraryAlert = (): string | undefined => {
     if (!librarySession) return undefined;
     const d = librarySession.diff();
-    if (d.added.length === 0 && d.enabledChanged.length === 0) return undefined;
+    if (d.added.length === 0) return undefined;
     return "⚠ This session has unpersisted library changes (see /library). They are not saved to the library and will be gone next session.";
   };
   const quit = () => {
@@ -589,12 +589,12 @@ async function main(): Promise<void> {
       case "persist-review": {
         const d = session.diff();
         say(formatDiff(d));
-        if (d.added.length || d.enabledChanged.length) say("Run /library persist to fold these into the saved library.");
+        if (d.added.length) say("Run /library persist to fold these into the saved library.");
         return;
       }
       case "persist": {
         const d = session.diff();
-        if (d.added.length === 0 && d.enabledChanged.length === 0) {
+        if (d.added.length === 0) {
           say("No unpersisted session changes.");
           return;
         }
@@ -604,7 +604,7 @@ async function main(): Promise<void> {
           say("Not persisted.");
           return;
         }
-        const selection = [...d.added, ...d.enabledChanged.map(({ kind, name }) => ({ kind, name }))];
+        const selection = d.added;
         try {
           await session.persist(selection, libPaths.manifestPath);
           transcript.log("session", { libraryPersisted: selection });

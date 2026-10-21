@@ -46,7 +46,7 @@ function fakeSession(overrides: Partial<LibrarySession> = {}): { session: Librar
       return [];
     },
     diff() {
-      return { added: [], enabledChanged: [] };
+      return { added: [] };
     },
     async persist() {},
     closeAll() {},

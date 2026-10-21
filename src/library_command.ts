@@ -9,11 +9,11 @@ export interface InventoryItem {
   name: string;
   enabled: boolean;
   persisted: boolean;
+  description?: string;
 }
 
 export interface LibraryDiff {
   added: { kind: ArtifactKind; name: string }[];
-  enabledChanged: { kind: ArtifactKind; name: string; enabled: boolean }[];
 }
 
 /** What a typed library command means. The REPL turns each into one LibrarySession call. */
@@ -69,32 +69,25 @@ function error(message: string): LibraryAction {
   return { type: "error", message: `${message}\n\n${LIBRARY_HELP}` };
 }
 
-/** List artifacts with their enabled state and whether they come from the saved library. */
+/** List artifacts with their loaded state and whether they come from the saved library. */
 export function formatInventory(items: InventoryItem[]): string {
   if (items.length === 0) return "Nothing in the library yet.";
   const width = Math.max(...items.map((it) => it.name.length));
   return items
     .map((it) => {
       const mark = it.enabled ? "●" : "○";
-      const state = it.enabled ? "enabled" : "disabled";
+      const state = it.enabled ? "loaded" : "not loaded";
       const origin = it.persisted ? "persisted" : "session-only";
-      return `  ${mark} ${it.kind.padEnd(5)} ${it.name.padEnd(width)}  ${state} · ${origin}`;
+      return `  ${mark} ${it.kind.padEnd(5)} ${it.name.padEnd(width)}  ${state} · ${origin}${it.description ? ` — ${it.description}` : ""}`;
     })
     .join("\n");
 }
 
-/** Render the overlay's difference from the saved library: what was added, what was toggled. */
+/** Render what is new since the saved library (session load/unload is never a change). */
 export function formatDiff(diff: LibraryDiff): string {
-  const { added, enabledChanged } = diff;
-  if (added.length === 0 && enabledChanged.length === 0) return "No unpersisted session changes.";
-  const lines = ["Unpersisted session changes:"];
-  if (added.length) {
-    lines.push("  added since the saved library:");
-    for (const a of added) lines.push(`    + ${a.kind} ${a.name}`);
-  }
-  if (enabledChanged.length) {
-    lines.push("  enabled/disabled changed from the saved library:");
-    for (const c of enabledChanged) lines.push(`    ~ ${c.kind} ${c.name} → ${c.enabled ? "enabled" : "disabled"}`);
-  }
+  const { added } = diff;
+  if (added.length === 0) return "No unpersisted session changes.";
+  const lines = ["Unpersisted session changes:", "  added since the saved library:"];
+  for (const a of added) lines.push(`    + ${a.kind} ${a.name}`);
   return lines.join("\n");
 }

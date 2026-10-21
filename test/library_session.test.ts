@@ -145,23 +145,44 @@ test("addServer adds tools and tracks the handle; setEnabled mcp false closes an
   assert.ok(!registry.has("srv__a") && !registry.has("srv__b"), "server tools removed");
 });
 
-test("diff reports a reloaded tool as added and a disabled baseline tool as enabledChanged", async () => {
+test("diff reports a reloaded new tool as added", async () => {
+  const root = await tmp();
+  const toolsDir = join(root, "tools");
+  await mkdir(toolsDir, { recursive: true });
+  await writeFile(join(toolsDir, "fresh.ts"), goodTool("fresh"));
+  const { session } = await makeSession({ root });
+  await session.reloadTools();
+  assert.deepEqual(session.diff(), { added: [{ kind: "tool", name: "fresh" }] });
+});
+
+test("loading and unloading a persisted tool is invisible to diff", async () => {
   const root = await tmp();
   const toolsDir = join(root, "tools");
   await mkdir(toolsDir, { recursive: true });
   await writeFile(join(toolsDir, "base.ts"), goodTool("base"));
-  await writeFile(join(toolsDir, "fresh.ts"), goodTool("fresh"));
-  const manifest: Manifest = { entries: [{ kind: "tool", name: "base", file: "base.ts", enabled: true }] };
+  const manifest: Manifest = { entries: [{ kind: "tool", name: "base", file: "base.ts", enabled: false }] };
   const { session } = await makeSession({ root, manifest });
-  await session.reloadTools();
+  assert.deepEqual(session.diff().added, []);
+  await session.setEnabled("tool", "base", true);
+  assert.deepEqual(session.diff().added, []);
   await session.setEnabled("tool", "base", false);
-  const d = session.diff();
-  assert.ok(d.added.some((a) => a.kind === "tool" && a.name === "fresh"), `expected fresh in added, got ${JSON.stringify(d.added)}`);
-  assert.ok(!d.added.some((a) => a.name === "base"), "base is persisted, not added");
-  assert.ok(
-    d.enabledChanged.some((c) => c.kind === "tool" && c.name === "base" && c.enabled === false),
-    `expected base disabled in enabledChanged, got ${JSON.stringify(d.enabledChanged)}`,
-  );
+  assert.deepEqual(session.diff().added, []);
+  assert.ok(!("enabledChanged" in session.diff()));
+});
+
+test("persisting a loaded new tool clears diff and writes enabled:false with description", async () => {
+  const root = await tmp();
+  const toolsDir = join(root, "tools");
+  await mkdir(toolsDir, { recursive: true });
+  await writeFile(join(toolsDir, "fresh.ts"), goodTool("fresh", "a fresh tool"));
+  const { session, deps } = await makeSession({ root });
+  await session.reloadTools();
+  await session.persist([{ kind: "tool", name: "fresh" }], deps.paths.manifestPath);
+  assert.deepEqual(session.diff().added, []);
+  assert.equal(session.inventory().find((i) => i.name === "fresh")?.enabled, true, "still loaded");
+  const e = (await loadManifest(deps.paths.manifestPath)).entries[0]!;
+  assert.equal(e.enabled, false);
+  assert.equal(e.description, "a fresh tool");
 });
 
 test("persist writes only the selected overlay entries", async () => {
@@ -178,7 +199,7 @@ test("persist writes only the selected overlay entries", async () => {
   const e = written.entries[0];
   assert.equal(e.kind, "tool");
   assert.equal(e.name, "keep");
-  assert.equal(e.enabled, true);
+  assert.equal(e.enabled, false);
   assert.equal((e as { file: string }).file, "keep.ts");
 });
 

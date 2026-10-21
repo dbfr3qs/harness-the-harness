@@ -28,7 +28,7 @@ export interface LibrarySession {
   listSkills(): SkillInfo[];
   readSkill(name: string): Promise<string>;
   inventory(): { kind: ArtifactKind; name: string; enabled: boolean; persisted: boolean; description?: string }[];
-  diff(): { added: { kind: ArtifactKind; name: string }[]; enabledChanged: { kind: ArtifactKind; name: string; enabled: boolean }[] };
+  diff(): { added: { kind: ArtifactKind; name: string }[] };
   /** Human-only: fold the selected overlay changes into the manifest and save it. */
   persist(selection: { kind: ArtifactKind; name: string }[], manifestPath: string): Promise<void>;
   /** Close every server this session started (for quit). */
@@ -248,22 +248,12 @@ export async function createLibrarySession(deps: LibrarySessionDeps): Promise<Li
     },
 
     diff() {
+      // Only genuinely new installs are persist-worthy; session load/unload never shows up here.
       const added: { kind: ArtifactKind; name: string }[] = [];
-      const enabledChanged: { kind: ArtifactKind; name: string; enabled: boolean }[] = [];
-      const baseline = new Map<string, boolean>();
-      for (const e of deps.manifest.entries) baseline.set(`${e.kind}:${e.name}`, e.enabled);
-      const consider = (kind: ArtifactKind, name: string, enabled: boolean, persisted: boolean) => {
-        if (!persisted) {
-          added.push({ kind, name });
-        } else {
-          const was = baseline.get(`${kind}:${name}`);
-          if (was !== undefined && was !== enabled) enabledChanged.push({ kind, name, enabled });
-        }
-      };
-      for (const [name, rec] of tools) consider("tool", name, rec.enabled, rec.persisted);
-      for (const [name, rec] of skills) consider("skill", name, rec.enabled, rec.persisted);
-      for (const [name, rec] of mcps) consider("mcp", name, rec.enabled, rec.persisted);
-      return { added, enabledChanged };
+      for (const [name, rec] of tools) if (!rec.persisted) added.push({ kind: "tool", name });
+      for (const [name, rec] of skills) if (!rec.persisted) added.push({ kind: "skill", name });
+      for (const [name, rec] of mcps) if (!rec.persisted) added.push({ kind: "mcp", name });
+      return { added };
     },
 
     async persist(selection, manifestPath) {
@@ -329,16 +319,16 @@ export async function createLibrarySession(deps: LibrarySessionDeps): Promise<Li
         file = basename(dest);
         rec.manifestFile = file;
       }
-      return { kind: "tool", name, file, enabled: rec.enabled };
+      return { kind: "tool", name, file, enabled: false, description: rec.description };
     }
     if (kind === "skill") {
       const rec = skills.get(name);
       if (!rec) throw new Error(`Cannot persist skill "${name}": it is not in this session.`);
-      return { kind: "skill", name, description: rec.description, enabled: rec.enabled };
+      return { kind: "skill", name, description: rec.description, enabled: false };
     }
     const rec = mcps.get(name);
     if (!rec) throw new Error(`Cannot persist MCP server "${name}": it is not in this session.`);
-    return { kind: "mcp", name, server: rec.server, enabled: rec.enabled };
+    return { kind: "mcp", name, server: rec.server, enabled: false, description: rec.description };
   }
 
   return session;
