@@ -22,9 +22,6 @@ function fakeSession(overrides: Partial<LibrarySession> = {}): { session: Librar
   const calls: Calls = { reloadTools: 0, addServer: [], setEnabled: [], listSkills: 0, readSkill: [] };
   const base: LibrarySession = {
     toolsDir: "/home/u/.harness/library/tools",
-    async applyBaseline() {
-      return { notes: [], warnings: [] };
-    },
     async reloadTools() {
       calls.reloadTools++;
       return { loaded: ["alpha", "beta"], failed: [] };

@@ -403,7 +403,7 @@ async function main(): Promise<void> {
       manifest,
       toolDeps: { defineTool, workspaceRoot: config.workspaceRoot, privatePaths },
       // The harness's own registry, so tools the library loads and servers it starts join the live
-      // tool set. applyBaseline and the library tools run only after `registry` below is created.
+      // tool set. the library tools run only after `registry` below is created.
       registry: { add: (t) => registry.add(t), remove: (n) => registry.remove(n), has: (n) => registry.has(n) },
       // Same hiddenEnv as the boot-time servers: a model-started server never sees a secret.
       startServer: (server) => startOneServer(server, { hiddenEnv }),
@@ -422,16 +422,6 @@ async function main(): Promise<void> {
     }),
   );
 
-  // Load the manifest's enabled tools, start its enabled servers, record its enabled skills. Done
-  // after the registry exists (the session adds into it); reported with the MCP notes below.
-  let libraryNotes: string[] = [];
-  let libraryWarnings: string[] = [];
-  if (librarySession) {
-    const applied = await librarySession.applyBaseline();
-    libraryNotes = applied.notes;
-    libraryWarnings = applied.warnings;
-    for (const w of applied.warnings) transcript.log("error", { message: w });
-  }
   const messages: Message[] = [];
   const lastModel = new Map<Provider, string>(); // per provider, for /provider switching back
 
@@ -533,9 +523,7 @@ async function main(): Promise<void> {
       : "web policy: none (web_fetch asks before every fetch) · /policy to set one",
   );
   for (const note of mcp.notes) say(note);
-  for (const note of libraryNotes) say(note);
   for (const w of mcp.warnings) say(`⚠ ${w}`);
-  for (const w of libraryWarnings) say(`⚠ ${w}`);
   const skippedServers = mcpServers.length - starting.length;
   if (skippedServers) say(dim(`(${skippedServers} MCP server(s) in ${config.mcpConfigPath} start only with --unattended, or with "interactive": true)`));
   if (term.screen) say(dim("Type while the model works: your message reaches it at its next step. Ctrl+C stops a run."));
