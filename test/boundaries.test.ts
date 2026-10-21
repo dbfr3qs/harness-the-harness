@@ -52,19 +52,40 @@ const stubWebFetch: Tool = {
   input_schema: { type: "object", properties: {} },
   handler: async () => "",
 };
+// The self-extension tools (run_shell/write_file can already load code and start servers, so these
+// can too) must only ever appear in unattended mode. Stubs stand in for them here so we can assert
+// the exact unattended set and their order without pulling in a real LibrarySession.
+const libStub = (name: string): Tool => ({ ...stubWebFetch, name });
+const libraryTools: Tool[] = ["reload_tools", "add_mcp_server", "set_artifact_enabled", "list_skills", "use_skill"].map(libStub);
+const libraryNames = libraryTools.map((t) => t.name);
 const build = (unattended: boolean) =>
-  assembleTools({ workspaceRoot: "/tmp", privatePaths: [], webFetch: stubWebFetch, unattended }).map((t) => t.name);
+  assembleTools({ workspaceRoot: "/tmp", privatePaths: [], webFetch: stubWebFetch, unattended, libraryTools: unattended ? libraryTools : [] }).map((t) => t.name);
 
-test("run_shell and write_file are absent from the normal tool set", () => {
+test("the normal tool set is read-only: no run_shell, write_file, or library tools", () => {
   const names = build(false);
   assert.ok(!names.includes("run_shell"), "run_shell must not be registered outside unattended mode");
   assert.ok(!names.includes("write_file"), "write_file must not be registered outside unattended mode");
+  for (const n of libraryNames) assert.ok(!names.includes(n), `${n} must not be registered outside unattended mode`);
   assert.deepEqual(names, ["get_time", "list_dir", "read_file", "web_fetch"]);
 });
 
-test("unattended mode adds run_shell and write_file, and nothing else", () => {
+test("unattended mode adds run_shell, write_file and the library tools, and nothing else", () => {
   const names = build(true);
-  assert.deepEqual(names, ["get_time", "list_dir", "read_file", "web_fetch", "run_shell", "write_file"]);
+  assert.deepEqual(names, ["get_time", "list_dir", "read_file", "web_fetch", "run_shell", "write_file", ...libraryNames]);
+});
+
+// Defense in depth: assembleTools must refuse to register library tools in normal mode even when a
+// caller mistakenly passes them. The unattended gate is the single guarantee, not the caller.
+test("normal mode drops library tools even if a caller passes them", () => {
+  const names = assembleTools({
+    workspaceRoot: "/tmp",
+    privatePaths: [],
+    webFetch: stubWebFetch,
+    unattended: false,
+    libraryTools: [libStub("reload_tools")],
+  }).map((t) => t.name);
+  assert.ok(!names.includes("reload_tools"), "a library tool passed in normal mode must not be registered");
+  assert.deepEqual(names, ["get_time", "list_dir", "read_file", "web_fetch"]);
 });
 
 // MCP servers are programs the harness starts, so their tools can do anything those programs can.
@@ -75,8 +96,15 @@ test("normal mode starts no MCP server unless it is marked interactive", () => {
   assert.deepEqual(serversToStart(servers, false).map((s) => s.name), ["docs"]);
 });
 
-test("MCP tools come after the built-in tools", () => {
+test("library tools come after the built-in tools and before the MCP tools", () => {
   const mcpTool: Tool = { ...stubWebFetch, name: "rea__open_binary" };
-  const names = assembleTools({ workspaceRoot: "/tmp", privatePaths: [], webFetch: stubWebFetch, unattended: true, mcpTools: [mcpTool] }).map((t) => t.name);
-  assert.deepEqual(names, ["get_time", "list_dir", "read_file", "web_fetch", "run_shell", "write_file", "rea__open_binary"]);
+  const names = assembleTools({
+    workspaceRoot: "/tmp",
+    privatePaths: [],
+    webFetch: stubWebFetch,
+    unattended: true,
+    libraryTools,
+    mcpTools: [mcpTool],
+  }).map((t) => t.name);
+  assert.deepEqual(names, ["get_time", "list_dir", "read_file", "web_fetch", "run_shell", "write_file", ...libraryNames, "rea__open_binary"]);
 });

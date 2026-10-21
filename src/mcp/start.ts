@@ -19,42 +19,59 @@ export interface McpStartResult {
   close(): void;
 }
 
+export interface StartedServer {
+  name: string;
+  tools: Tool[];
+  instructions?: string; // the server's own text, as it sent it
+  warnings: string[]; // allowlist patterns that matched nothing, tools skipped for long names
+  close(): void; // stops just this server
+}
+
+/** Starts one server and builds its tools. Throws an Error saying why if it cannot start. */
+export async function startOneServer(server: McpServerConfig, opts: McpStartOptions): Promise<StartedServer> {
+  const conn = await connectMcpServer(server, {
+    hiddenEnv: opts.hiddenEnv,
+    ...(server.startupTimeoutMs ? { startupTimeoutMs: server.startupTimeoutMs } : {}),
+    ...(server.callTimeoutMs ? { callTimeoutMs: server.callTimeoutMs } : {}),
+  });
+  try {
+    const made = createMcpTools(conn, { ...(server.tools ? { allow: server.tools } : {}), ...(server.interactive && opts.confirm ? { confirm: opts.confirm } : {}) });
+    const warnings = [
+      ...made.unmatched.map((p) => `MCP server "${server.name}": "${p}" matched no tool`),
+      ...made.skipped.map((n) => `MCP server "${server.name}": skipped "${n}", whose name is too long for the API`),
+    ];
+    return { name: server.name, tools: made.tools, ...(conn.instructions ? { instructions: conn.instructions } : {}), warnings, close: () => conn.close() };
+  } catch (e) {
+    conn.close();
+    throw e;
+  }
+}
+
 /**
  * Starts the servers in parallel. One that fails to start is reported and left out, rather than
  * stopping the harness: the built-in tools still work without it.
  */
 export async function startMcpServers(servers: McpServerConfig[], opts: McpStartOptions): Promise<McpStartResult> {
-  const results = await Promise.allSettled(
-    servers.map((s) =>
-      connectMcpServer(s, {
-        hiddenEnv: opts.hiddenEnv,
-        ...(s.startupTimeoutMs ? { startupTimeoutMs: s.startupTimeoutMs } : {}),
-        ...(s.callTimeoutMs ? { callTimeoutMs: s.callTimeoutMs } : {}),
-      }),
-    ),
-  );
-  const connections: McpConnection[] = [];
+  const results = await Promise.allSettled(servers.map((s) => startOneServer(s, opts)));
+  const started: StartedServer[] = [];
   const tools: Tool[] = [];
   const notes: string[] = [];
   const warnings: string[] = [];
   let systemPrompt = "";
-  results.forEach((r, i) => {
-    const s = servers[i]!;
+  results.forEach((r) => {
     if (r.status === "rejected") {
       warnings.push(`${r.reason instanceof Error ? r.reason.message : String(r.reason)} (its tools are unavailable)`);
       return;
     }
-    const conn = r.value;
-    connections.push(conn);
-    const made = createMcpTools(conn, { ...(s.tools ? { allow: s.tools } : {}), ...(s.interactive && opts.confirm ? { confirm: opts.confirm } : {}) });
-    tools.push(...made.tools);
-    for (const p of made.unmatched) warnings.push(`MCP server "${s.name}": "${p}" matched no tool`);
-    for (const name of made.skipped) warnings.push(`MCP server "${s.name}": skipped "${name}", whose name is too long for the API`);
+    const s = r.value;
+    started.push(s);
+    tools.push(...s.tools);
+    warnings.push(...s.warnings);
     // What the model is sent for every request; ~4 characters per token.
-    const chars = made.tools.reduce((n, t) => n + JSON.stringify({ name: t.name, description: t.description, input_schema: t.input_schema }).length, 0);
-    notes.push(`MCP server "${s.name}": ${made.tools.length} tool(s), ~${Math.ceil(chars / 4).toLocaleString("en-US")} tokens of definitions per request`);
-    if (conn.instructions && made.tools.length) {
-      systemPrompt += `\n\n# Instructions from MCP server "${s.name}" (its tools are named ${s.name}__<tool>)\n${conn.instructions.trim()}`;
+    const chars = s.tools.reduce((n, t) => n + JSON.stringify({ name: t.name, description: t.description, input_schema: t.input_schema }).length, 0);
+    notes.push(`MCP server "${s.name}": ${s.tools.length} tool(s), ~${Math.ceil(chars / 4).toLocaleString("en-US")} tokens of definitions per request`);
+    if (s.instructions && s.tools.length) {
+      systemPrompt += `\n\n# Instructions from MCP server "${s.name}" (its tools are named ${s.name}__<tool>)\n${s.instructions.trim()}`;
     }
   });
   return {
@@ -62,6 +79,6 @@ export async function startMcpServers(servers: McpServerConfig[], opts: McpStart
     systemPrompt,
     notes,
     warnings,
-    close: () => connections.forEach((c) => c.close()),
+    close: () => started.forEach((s) => s.close()),
   };
 }

@@ -16,31 +16,58 @@ export interface ToolOutcome {
   isError: boolean;
 }
 
-const NAME_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
+export const NAME_PATTERN = /^[a-zA-Z0-9_-]{1,128}$/;
 
 export function defineTool(tool: Tool): Tool {
   return tool;
 }
 
 export function createRegistry(tools: Tool[]) {
-  const byName = new Map<string, Tool>();
+  // Built-ins are locked at construction; `dynamic` holds tools added later at runtime.
+  const builtins = new Map<string, Tool>();
+  const dynamic = new Map<string, Tool>();
   for (const tool of tools) {
     if (!NAME_PATTERN.test(tool.name)) {
       throw new Error(`Invalid tool name "${tool.name}": must match ${NAME_PATTERN}`);
     }
-    if (byName.has(tool.name)) throw new Error(`Duplicate tool name "${tool.name}"`);
-    byName.set(tool.name, tool);
+    if (builtins.has(tool.name)) throw new Error(`Duplicate tool name "${tool.name}"`);
+    builtins.set(tool.name, tool);
   }
 
+  const lookup = (name: string): Tool | undefined => builtins.get(name) ?? dynamic.get(name);
+  const current = (): Tool[] => [...builtins.values(), ...dynamic.values()];
+
+  function add(tool: Tool): void {
+    if (!NAME_PATTERN.test(tool.name)) {
+      throw new Error(`Invalid tool name "${tool.name}": must match ${NAME_PATTERN}. Choose a name using only letters, digits, "_" and "-".`);
+    }
+    if (builtins.has(tool.name)) {
+      throw new Error(`Cannot add "${tool.name}": it is a built-in tool and cannot be replaced. Choose a different name.`);
+    }
+    if (dynamic.has(tool.name)) {
+      throw new Error(`Cannot add "${tool.name}": a tool with that name is already loaded. Remove it first or choose a different name.`);
+    }
+    dynamic.set(tool.name, tool);
+  }
+
+  function remove(name: string): void {
+    if (builtins.has(name)) {
+      throw new Error(`Cannot remove "${name}": it is a built-in tool. Only tools added at runtime can be removed.`);
+    }
+    dynamic.delete(name);
+  }
+
+  const has = (name: string): boolean => lookup(name) !== undefined;
+
   function definitions(): ToolDefinition[] {
-    return tools.map(({ name, description, input_schema }) => ({ name, description, input_schema }));
+    return current().map(({ name, description, input_schema }) => ({ name, description, input_schema }));
   }
 
   // Never throws: every failure becomes an instructive error result for the model.
   async function dispatch(name: string, input: unknown, signal: AbortSignal = new AbortController().signal): Promise<ToolOutcome> {
-    const tool = byName.get(name);
+    const tool = lookup(name);
     if (!tool) {
-      const valid = [...byName.keys()].join(", ") || "(none)";
+      const valid = current().map((t) => t.name).join(", ") || "(none)";
       return fail(`unknown tool "${name}". Valid tools are: ${valid}.`);
     }
 
@@ -56,7 +83,7 @@ export function createRegistry(tools: Tool[]) {
     }
   }
 
-  return { definitions, dispatch };
+  return { definitions, dispatch, add, remove, has };
 }
 
 export type Registry = ReturnType<typeof createRegistry>;

@@ -56,7 +56,6 @@ export async function runAgent(opts: {
   continueOnMaxTokens?: boolean;
 }): Promise<AgentResult> {
   const { model, registry, system, messages, maxTurns, maxToolOutputChars, hooks = {}, signal, continueOnMaxTokens } = opts;
-  const tools = registry.definitions();
   const usage: Usage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
   let turns = 0;
   let toolCalls = 0;
@@ -76,6 +75,7 @@ export async function runAgent(opts: {
       appendUserText(messages, interjected);
       hooks.onUserInput?.(interjected);
     }
+    const tools = registry.definitions(); // re-read each turn: tools may be added mid-run
     let res: MessageResponse;
     try {
       res = await model({ system, messages, tools, ...(signal ? { signal } : {}) });
