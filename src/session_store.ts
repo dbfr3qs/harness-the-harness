@@ -1,6 +1,7 @@
 import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { ConfigError } from "./config.ts";
+import type { Config } from "./config.ts";
 import type { LibrarySnapshot } from "./library/session.ts";
 import type { PrivatePath } from "./tools/private_paths.ts";
 import type { WebPolicy } from "./tools/web_policy.ts";
@@ -132,4 +133,39 @@ export async function loadSession(dir: string, id: string): Promise<SessionState
     throw new ConfigError(`session file ${file} has a malformed messages list`);
   }
   return o as SessionState;
+}
+
+export interface SessionStateParts {
+  config: Pick<Config, "unattended" | "provider" | "model" | "showThinking" | "maxTurns" | "maxTokens" | "contextWindow" | "transcriptPath">;
+  sessionId: string;
+  createdAt?: string; // from the prior state when resuming
+  now?: Date;
+  policy: WebPolicy;
+  messages: Message[];
+  library?: LibrarySnapshot;
+}
+
+/** Assembles the on-disk state. Infinity never reaches JSON: an unlimited maxTurns is "unlimited". */
+export function buildSessionState(parts: SessionStateParts): SessionState {
+  const { config } = parts;
+  const updatedAt = (parts.now ?? new Date()).toISOString();
+  return {
+    version: 1,
+    id: parts.sessionId,
+    createdAt: parts.createdAt ?? updatedAt,
+    updatedAt,
+    unattended: config.unattended,
+    settings: {
+      provider: config.provider,
+      model: config.model,
+      showThinking: config.showThinking,
+      maxTurns: config.maxTurns === Infinity ? "unlimited" : config.maxTurns,
+      maxTokens: config.maxTokens,
+      ...(config.contextWindow !== undefined ? { contextWindow: config.contextWindow } : {}),
+    },
+    transcriptPath: config.transcriptPath,
+    webPolicy: structuredClone(parts.policy),
+    messages: structuredClone(parts.messages),
+    ...(parts.library ? { library: parts.library } : {}),
+  };
 }

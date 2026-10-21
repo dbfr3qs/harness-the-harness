@@ -308,7 +308,13 @@ export async function createLibrarySession(deps: LibrarySessionDeps): Promise<Li
           }
         }
         if (!file) continue;
-        snap.tools.push({ name, file, hash: hashFile(file), description: rec.description, sessionAdded: !rec.persisted, loaded: rec.enabled });
+        let hash = "";
+        try {
+          hash = hashFile(file);
+        } catch {
+          hash = ""; // file deleted mid-session: a save must never crash the REPL
+        }
+        snap.tools.push({ name, file, hash, description: rec.description, sessionAdded: !rec.persisted, loaded: rec.enabled });
       }
       for (const [name, rec] of mcps) {
         snap.mcps.push({ name, server: rec.server, description: rec.description, sessionAdded: !rec.persisted, loaded: rec.enabled });

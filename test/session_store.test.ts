@@ -6,6 +6,7 @@ import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { ConfigError } from "../src/config.ts";
 import {
+  buildSessionState,
   createSessionStore,
   isValidSessionId,
   loadSession,
@@ -125,4 +126,28 @@ test("save into an unwritable dir warns once and does not throw", async () => {
   });
   await store.flush();
   assert.equal(warnings.length, 1);
+});
+
+test("buildSessionState copies settings, encodes Infinity, and keeps createdAt on resume", () => {
+  const id = randomUUID();
+  const config = {
+    unattended: true, provider: "anthropic", model: "m", showThinking: true,
+    maxTurns: Infinity, maxTokens: 999, contextWindow: 1234, transcriptPath: "t.jsonl",
+  } as never;
+  const policy = { default: "ask", rules: [] } as never;
+  const messages = [{ role: "user", content: "hi" }] as never;
+  const lib = { tools: [], mcps: [], skills: [] };
+  const s = buildSessionState({ config, sessionId: id, createdAt: "2020-01-01T00:00:00.000Z", now: new Date("2026-01-01T00:00:00Z"), policy, messages, library: lib });
+  assert.equal(s.settings.maxTurns, "unlimited");
+  assert.equal(s.settings.maxTokens, 999);
+  assert.equal(s.settings.contextWindow, 1234);
+  assert.equal(s.createdAt, "2020-01-01T00:00:00.000Z");
+  assert.equal(s.updatedAt, "2026-01-01T00:00:00.000Z");
+  assert.deepEqual(s.library, lib);
+  assert.doesNotThrow(() => JSON.stringify(s));
+  const t = buildSessionState({ config: { ...(config as object), maxTurns: 7, contextWindow: undefined } as never, sessionId: id, now: new Date("2026-01-01T00:00:00Z"), policy, messages });
+  assert.equal(t.settings.maxTurns, 7);
+  assert.equal("library" in t, false);
+  assert.equal("contextWindow" in t.settings, false);
+  assert.equal(t.createdAt, t.updatedAt);
 });
