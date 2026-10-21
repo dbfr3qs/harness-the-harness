@@ -61,3 +61,44 @@ test("save then load returns equal entries, creating the directory and leaving n
   assert.equal(await readFile(path, "utf8"), formatManifest(sample));
   assert.deepEqual(await readdir(join(dir, "sub")), ["m.json"]);
 });
+
+test("a tool entry keeps an optional description, and omitting it leaves it undefined", () => {
+  const withDesc = parseManifest({ entries: [{ kind: "tool", name: "t", file: "t.ts", description: "does X", enabled: true }] }, "m.json");
+  assert.deepEqual(withDesc.entries[0], { kind: "tool", name: "t", file: "t.ts", description: "does X", enabled: true });
+  const without = parseManifest({ entries: [{ kind: "tool", name: "t", file: "t.ts", enabled: true }] }, "m.json");
+  assert.equal((without.entries[0] as { description?: string }).description, undefined);
+  assert.ok(!("description" in without.entries[0]));
+});
+
+test("an mcp entry accepts an optional description with or without it", () => {
+  const server = { command: "node", args: ["srv.js"] };
+  const withDesc = parseManifest({ entries: [{ kind: "mcp", name: "files", server, description: "reads files", enabled: true }] }, "m.json");
+  assert.equal((withDesc.entries[0] as { description?: string }).description, "reads files");
+  const without = parseManifest({ entries: [{ kind: "mcp", name: "files", server, enabled: true }] }, "m.json");
+  assert.ok(!("description" in without.entries[0]));
+});
+
+test("a non-string description on a tool entry is a ConfigError naming the entry", () => {
+  assert.throws(
+    () => parseManifest({ entries: [{ kind: "tool", name: "t", file: "t.ts", description: 3, enabled: true }] }, "m.json"),
+    (err: Error) => err instanceof ConfigError && /entries\[0\]\.description/.test(err.message),
+  );
+});
+
+test("a non-string description on an mcp entry is a ConfigError naming the entry", () => {
+  const server = { command: "node", args: ["srv.js"] };
+  assert.throws(
+    () => parseManifest({ entries: [{ kind: "mcp", name: "files", server, description: 3, enabled: true }] }, "m.json"),
+    (err: Error) => err instanceof ConfigError && /entries\[0\]\.description/.test(err.message),
+  );
+});
+
+test("described tool and mcp entries survive formatManifest then parseManifest unchanged", () => {
+  const described: Manifest = {
+    entries: [
+      { kind: "tool", name: "word_count", file: "word_count.ts", description: "counts words", enabled: true },
+      { kind: "mcp", name: "files", server: { name: "files", command: "node", args: ["srv.js"], interactive: false, tools: ["read*"] }, description: "reads files", enabled: false },
+    ],
+  };
+  assert.deepEqual(parseManifest(JSON.parse(formatManifest(described)), "m.json"), described);
+});

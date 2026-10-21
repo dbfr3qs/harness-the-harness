@@ -66,19 +66,21 @@ test("a command that is not a library command is an instructive error", () => {
   assert.equal(parseLibraryCommand("/policy show").type, "error");
 });
 
-test("formatInventory marks enabled state and persisted vs session-only", () => {
+test("formatInventory shows loaded vs not-loaded, origin, and description", () => {
   const items: InventoryItem[] = [
-    { kind: "tool", name: "saved_on", enabled: true, persisted: true },
+    { kind: "tool", name: "saved_on", enabled: true, persisted: true, description: "does a thing" },
     { kind: "mcp", name: "fresh_off", enabled: false, persisted: false },
   ];
   const out = formatInventory(items);
   const [first, second] = out.split("\n");
   assert.match(first!, /saved_on/);
-  assert.match(first!, /enabled/);
+  assert.match(first!, /\bloaded\b/);
+  assert.doesNotMatch(first!, /not loaded/);
+  assert.match(first!, /does a thing/);
   assert.match(first!, /persisted/);
   assert.doesNotMatch(first!, /session-only/);
   assert.match(second!, /fresh_off/);
-  assert.match(second!, /disabled/);
+  assert.match(second!, /not loaded/);
   assert.match(second!, /session-only/);
 });
 
@@ -86,21 +88,12 @@ test("formatInventory handles an empty library", () => {
   assert.match(formatInventory([]), /[Nn]othing/);
 });
 
-test("formatDiff renders added separately from enable-changed", () => {
-  const diff: LibraryDiff = {
-    added: [{ kind: "tool", name: "new_tool" }],
-    enabledChanged: [{ kind: "mcp", name: "rea", enabled: false }],
-  };
-  const out = formatDiff(diff);
-  assert.match(out, /new_tool/);
+test("formatDiff lists added items and mentions no enabled/disabled change", () => {
+  const out = formatDiff({ added: [{ kind: "mcp", name: "rea" }] });
   assert.match(out, /rea/);
-  // The two kinds of change are shown under different headings.
-  const addedIdx = out.indexOf("new_tool");
-  const changedIdx = out.indexOf("rea");
-  assert.ok(addedIdx !== -1 && changedIdx !== -1 && addedIdx !== changedIdx);
-  assert.match(out, /disabled/); // the new state of the changed entry
+  assert.doesNotMatch(out, /enabled|disabled/);
 });
 
 test("formatDiff reports an empty diff plainly", () => {
-  assert.match(formatDiff({ added: [], enabledChanged: [] }), /[Nn]o unpersisted/);
+  assert.match(formatDiff({ added: [] }), /[Nn]o unpersisted/);
 });

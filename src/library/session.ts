@@ -4,7 +4,7 @@ import type { Tool } from "../registry.ts";
 import type { McpServerConfig } from "../mcp/config.ts";
 import type { StartedServer } from "../mcp/start.ts";
 import { loadToolFile, scanToolsDir, type ToolFactoryDeps } from "./loader.ts";
-import { readSkill, scanSkillsDir, type SkillInfo } from "./skills.ts";
+import { readSkill } from "./skills.ts";
 import { saveManifest, type ArtifactKind, type Manifest, type ManifestEntry } from "./manifest.ts";
 import type { LibraryPaths } from "./paths.ts";
 
@@ -19,18 +19,15 @@ export interface LibrarySessionDeps {
 export interface LibrarySession {
   /** Absolute path of the tools directory, where authored tool files belong. */
   readonly toolsDir: string;
-  /** Load the manifest's enabled tools, start its enabled servers, record its enabled skills. */
-  applyBaseline(): Promise<{ notes: string[]; warnings: string[] }>;
   /** Scan toolsDir and (re)load every tool file into the registry. Does not touch the manifest. */
   reloadTools(): Promise<{ loaded: string[]; failed: { file: string; error: string }[] }>;
   /** Start a server, register its tools, track the handle. Throws (adding nothing) on failure. */
-  addServer(server: McpServerConfig): Promise<{ tools: string[]; instructions?: string }>;
+  addServer(server: McpServerConfig, description?: string): Promise<{ tools: string[]; instructions?: string }>;
   /** Session-only enable/disable. Returns a human-readable line. */
   setEnabled(kind: ArtifactKind, name: string, enabled: boolean): Promise<string>;
-  listSkills(): SkillInfo[];
   readSkill(name: string): Promise<string>;
-  inventory(): { kind: ArtifactKind; name: string; enabled: boolean; persisted: boolean }[];
-  diff(): { added: { kind: ArtifactKind; name: string }[]; enabledChanged: { kind: ArtifactKind; name: string; enabled: boolean }[] };
+  inventory(): { kind: ArtifactKind; name: string; enabled: boolean; persisted: boolean; description?: string }[];
+  diff(): { added: { kind: ArtifactKind; name: string }[] };
   /** Human-only: fold the selected overlay changes into the manifest and save it. */
   persist(selection: { kind: ArtifactKind; name: string }[], manifestPath: string): Promise<void>;
   /** Close every server this session started (for quit). */
@@ -39,6 +36,7 @@ export interface LibrarySession {
 
 interface ToolRec {
   enabled: boolean;
+  description?: string;
   persisted: boolean;
   file?: string; // absolute path last loaded from
   manifestFile?: string; // the relative `file` string from the baseline manifest
@@ -50,6 +48,7 @@ interface SkillRec {
 }
 interface McpRec {
   enabled: boolean;
+  description?: string;
   persisted: boolean;
   server: McpServerConfig;
   handle?: StartedServer;
@@ -64,11 +63,13 @@ export async function createLibrarySession(deps: LibrarySessionDeps): Promise<Li
   const skills = new Map<string, SkillRec>();
   const mcps = new Map<string, McpRec>();
 
-  // Seed the overlay from the persisted baseline. Nothing is loaded yet; applyBaseline does that.
+  // Seed the overlay from the persisted baseline. The catalog is dormant: tools and servers are
+  // known but NOT loaded (enabled: false) until setEnabled loads them on demand. A skill's flag
+  // means "offered", a human preference honored at startup, so it keeps its persisted value.
   for (const e of deps.manifest.entries) {
-    if (e.kind === "tool") tools.set(e.name, { enabled: e.enabled, persisted: true, manifestFile: e.file });
+    if (e.kind === "tool") tools.set(e.name, { enabled: false, persisted: true, manifestFile: e.file, description: e.description });
     else if (e.kind === "skill") skills.set(e.name, { enabled: e.enabled, persisted: true, description: e.description });
-    else mcps.set(e.name, { enabled: e.enabled, persisted: true, server: e.server, toolNames: [] });
+    else mcps.set(e.name, { enabled: false, persisted: true, server: e.server, toolNames: [], description: e.description });
   }
 
   // Resolve a tool file under toolsDir, refusing any path that escapes it (a manifest `file` of
@@ -119,39 +120,6 @@ export async function createLibrarySession(deps: LibrarySessionDeps): Promise<Li
 
   const session: LibrarySession = {
     toolsDir,
-    async applyBaseline() {
-      const notes: string[] = [];
-      const warnings: string[] = [];
-
-      for (const e of deps.manifest.entries) {
-        if (!e.enabled) continue; // disabled baseline entries are left untouched
-        try {
-          if (e.kind === "tool") {
-            const rec = tools.get(e.name)!;
-            const abs = resolveToolFile(e.file);
-            const tool = await loadToolFile(abs, toolDeps);
-            if (tool.name !== e.name) {
-              throw new Error(`file ${e.file} defines a tool named "${tool.name}", but the manifest lists it as "${e.name}". Make the names match.`);
-            }
-            if (registry.has(e.name)) registry.remove(e.name);
-            registry.add(tool);
-            rec.file = abs;
-            notes.push(`Loaded tool "${e.name}".`);
-          } else if (e.kind === "mcp") {
-            const rec = mcps.get(e.name)!;
-            await startAndRegister(rec);
-            notes.push(`Started MCP server "${e.name}" (${rec.toolNames.length} tool(s)).`);
-            for (const w of rec.handle?.warnings ?? []) warnings.push(w);
-          } else {
-            notes.push(`Enabled skill "${e.name}".`);
-          }
-        } catch (err) {
-          warnings.push(`Could not enable ${e.kind} "${e.name}" (from ${describeArtifactSource(e)}): ${message(err)}`);
-        }
-      }
-      return { notes, warnings };
-    },
-
     async reloadTools() {
       const loaded: string[] = [];
       const failed: { file: string; error: string }[] = [];
@@ -168,7 +136,7 @@ export async function createLibrarySession(deps: LibrarySessionDeps): Promise<Li
           if (tools.has(name) && registry.has(name)) registry.remove(name);
           registry.add(tool);
           const prior = tools.get(name);
-          tools.set(name, { enabled: true, persisted: prior?.persisted ?? false, file, manifestFile: prior?.manifestFile });
+          tools.set(name, { enabled: true, persisted: prior?.persisted ?? false, file, manifestFile: prior?.manifestFile, description: tool.description });
           seen.add(name);
           loaded.push(name);
         } catch (err) {
@@ -178,10 +146,10 @@ export async function createLibrarySession(deps: LibrarySessionDeps): Promise<Li
       return { loaded, failed };
     },
 
-    async addServer(server) {
+    async addServer(server, description) {
       const existing = mcps.get(server.name);
       const persisted = existing?.persisted ?? false;
-      const rec: McpRec = { enabled: false, persisted, server, toolNames: [] };
+      const rec: McpRec = { enabled: false, persisted, server, toolNames: [], description: description ?? existing?.description };
       // Start the replacement FIRST so a failure leaves any running same-named server untouched.
       let handle: StartedServer;
       try {
@@ -233,6 +201,7 @@ export async function createLibrarySession(deps: LibrarySessionDeps): Promise<Li
           if (registry.has(name)) registry.remove(name);
           registry.add(tool);
           rec.file = abs;
+          rec.description = tool.description;
           rec.enabled = true;
           return `Enabled tool "${name}".`;
         }
@@ -258,42 +227,25 @@ export async function createLibrarySession(deps: LibrarySessionDeps): Promise<Li
       return `${enabled ? "Enabled" : "Disabled"} skill "${name}".`;
     },
 
-    listSkills() {
-      return [...skills.entries()]
-        .filter(([, rec]) => rec.enabled)
-        .map(([name, rec]) => ({ name, description: rec.description, dir: join(paths.skillsDir, name) }))
-        .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-    },
-
     readSkill(name) {
       return readSkill(paths.skillsDir, name);
     },
 
     inventory() {
-      const out: { kind: ArtifactKind; name: string; enabled: boolean; persisted: boolean }[] = [];
-      for (const [name, rec] of tools) out.push({ kind: "tool", name, enabled: rec.enabled, persisted: rec.persisted });
-      for (const [name, rec] of skills) out.push({ kind: "skill", name, enabled: rec.enabled, persisted: rec.persisted });
-      for (const [name, rec] of mcps) out.push({ kind: "mcp", name, enabled: rec.enabled, persisted: rec.persisted });
+      const out: { kind: ArtifactKind; name: string; enabled: boolean; persisted: boolean; description?: string }[] = [];
+      for (const [name, rec] of tools) out.push({ kind: "tool", name, enabled: rec.enabled, persisted: rec.persisted, description: rec.description });
+      for (const [name, rec] of skills) out.push({ kind: "skill", name, enabled: rec.enabled, persisted: rec.persisted, description: rec.description });
+      for (const [name, rec] of mcps) out.push({ kind: "mcp", name, enabled: rec.enabled, persisted: rec.persisted, description: rec.description });
       return out;
     },
 
     diff() {
+      // Only genuinely new installs are persist-worthy; session load/unload never shows up here.
       const added: { kind: ArtifactKind; name: string }[] = [];
-      const enabledChanged: { kind: ArtifactKind; name: string; enabled: boolean }[] = [];
-      const baseline = new Map<string, boolean>();
-      for (const e of deps.manifest.entries) baseline.set(`${e.kind}:${e.name}`, e.enabled);
-      const consider = (kind: ArtifactKind, name: string, enabled: boolean, persisted: boolean) => {
-        if (!persisted) {
-          added.push({ kind, name });
-        } else {
-          const was = baseline.get(`${kind}:${name}`);
-          if (was !== undefined && was !== enabled) enabledChanged.push({ kind, name, enabled });
-        }
-      };
-      for (const [name, rec] of tools) consider("tool", name, rec.enabled, rec.persisted);
-      for (const [name, rec] of skills) consider("skill", name, rec.enabled, rec.persisted);
-      for (const [name, rec] of mcps) consider("mcp", name, rec.enabled, rec.persisted);
-      return { added, enabledChanged };
+      for (const [name, rec] of tools) if (!rec.persisted) added.push({ kind: "tool", name });
+      for (const [name, rec] of skills) if (!rec.persisted) added.push({ kind: "skill", name });
+      for (const [name, rec] of mcps) if (!rec.persisted) added.push({ kind: "mcp", name });
+      return { added };
     },
 
     async persist(selection, manifestPath) {
@@ -359,25 +311,19 @@ export async function createLibrarySession(deps: LibrarySessionDeps): Promise<Li
         file = basename(dest);
         rec.manifestFile = file;
       }
-      return { kind: "tool", name, file, enabled: rec.enabled };
+      return { kind: "tool", name, file, enabled: false, description: rec.description };
     }
     if (kind === "skill") {
       const rec = skills.get(name);
       if (!rec) throw new Error(`Cannot persist skill "${name}": it is not in this session.`);
-      return { kind: "skill", name, description: rec.description, enabled: rec.enabled };
+      return { kind: "skill", name, description: rec.description, enabled: false };
     }
     const rec = mcps.get(name);
     if (!rec) throw new Error(`Cannot persist MCP server "${name}": it is not in this session.`);
-    return { kind: "mcp", name, server: rec.server, enabled: rec.enabled };
+    return { kind: "mcp", name, server: rec.server, enabled: false, description: rec.description };
   }
 
   return session;
-}
-
-function describeArtifactSource(e: ManifestEntry): string {
-  if (e.kind === "tool") return e.file;
-  if (e.kind === "mcp") return e.server.command;
-  return "the skills directory";
 }
 
 function message(err: unknown): string {

@@ -43,9 +43,10 @@ export function createLibraryTools(session: LibrarySession): Tool[] {
   const reloadTools = defineTool({
     name: "reload_tools",
     description:
-      `Rescan the library tools directory (${session.toolsDir}) and (re)load every tool file into this session. ` +
+      `Rescan the library tools directory (${session.toolsDir}) and load every tool file in it, adding them to the live tool set. ` +
       `Author a tool by writing a .ts file into that directory with run_shell (write_file cannot reach it: it only writes inside the workspace). ` +
-      "Reports which tools loaded and which files failed (with the reason). Call it after writing or editing a tool file.",
+      "A tool file there is installed (in the catalog, costing nothing) and loading it puts it in the live tool set. " +
+      "Reports which tools loaded and which files failed (with the reason). Call it once after writing or editing a tool file; changing the tool set resets the prompt cache.",
     input_schema: { type: "object", properties: {} },
     handler: async () => {
       const { loaded, failed } = await session.reloadTools();
@@ -65,9 +66,9 @@ export function createLibraryTools(session: LibrarySession): Tool[] {
   const addMcpServer = defineTool({
     name: "add_mcp_server",
     description:
-      "Start an MCP server for this session and register its tools. Prefer a reputable, existing server (one the user or the wider ecosystem already trusts) over writing your own; " +
+      "Install an MCP server in the catalog and load it: start it now and add its tools to the live tool set. Give a short description so list_catalog can show what it is for. Prefer a reputable, existing server (one the user or the wider ecosystem already trusts) over writing your own; " +
       "an MCP server is a program that runs with the harness's privileges. The server's own usage instructions are appended to the result so you can see how to drive its tools. " +
-      "Like any new tools, these last only for this session unless the user persists the server.",
+      "Load deliberately and unload it with set_artifact_enabled when done: changing the tool set resets the prompt cache. It lasts only this session unless the user persists it.",
     input_schema: {
       type: "object",
       properties: {
@@ -75,12 +76,14 @@ export function createLibraryTools(session: LibrarySession): Tool[] {
         command: { type: "string", description: "The program to run, such as \"npx\" or an absolute path" },
         args: { type: "array", description: "Command-line arguments for the program (optional)" },
         env: { type: "object", description: "Extra environment variables for the program, name to string value (optional)" },
+        description: { type: "string", description: "A one-line description of what the server is for, shown by list_catalog (optional)" },
       },
       required: ["name", "command"],
     },
     handler: async (input) => {
       const config = toServerConfig(input);
-      const { tools, instructions } = await session.addServer(config);
+      const description = typeof input.description === "string" && input.description.trim() ? input.description : undefined;
+      const { tools, instructions } = await session.addServer(config, description);
       const head = tools.length
         ? `Added MCP server "${config.name}" with ${tools.length} tool(s): ${tools.join(", ")}.`
         : `Added MCP server "${config.name}", but it offered no tools.`;
@@ -92,8 +95,9 @@ export function createLibraryTools(session: LibrarySession): Tool[] {
   const setArtifactEnabled = defineTool({
     name: "set_artifact_enabled",
     description:
-      "Enable or disable one library artifact for this session. Enabling a tool loads it; disabling removes it from the tool set. " +
-      "Enabling an MCP server starts it; disabling stops it. Enabling or disabling a skill only flips whether list_skills shows it.",
+      "Load or unload one installed library artifact (see list_catalog). Installed means it is in the catalog, which costs nothing; loading a tool adds it to the live tool set, " +
+      "and loading an MCP server starts it. Unloading removes the tool or stops the server but keeps it installed. For a skill, enabled only controls whether list_catalog shows it. " +
+      "Load deliberately and unload when done: changing the tool set resets the prompt cache.",
     input_schema: {
       type: "object",
       properties: {
@@ -106,24 +110,32 @@ export function createLibraryTools(session: LibrarySession): Tool[] {
     handler: async (input) => session.setEnabled(input.kind as ArtifactKind, input.name as string, input.enabled as boolean),
   });
 
-  const listSkills = defineTool({
-    name: "list_skills",
+  const listCatalog = defineTool({
+    name: "list_catalog",
     description:
-      "List the skills available in this session: each a name and a one-line description. A skill is a written how-to; read one with use_skill before a task it covers.",
+      "List what is installed in the library catalog: tools and MCP servers (each marked [loaded] in the live tool set or [available] to load with set_artifact_enabled) and skills. " +
+      "A skill is a written how-to; read one with use_skill before a task it covers.",
     input_schema: { type: "object", properties: {} },
     handler: async () => {
-      const skills = session.listSkills();
-      if (!skills.length) return "No skills are available in this session.";
-      return skills.map((s) => `- ${s.name}: ${s.description || "(no description)"}`).join("\n");
+      const lines: string[] = [];
+      for (const row of session.inventory()) {
+        const desc = row.description ? `: ${row.description}` : "";
+        if (row.kind === "skill") {
+          if (row.enabled) lines.push(`skill ${row.name}${desc}`);
+        } else {
+          lines.push(`${row.kind} ${row.name} [${row.enabled ? "loaded" : "available"}]${desc}`);
+        }
+      }
+      return lines.length ? lines.join("\n") : "No tools, servers, or skills are installed yet.";
     },
   });
 
   const useSkill = defineTool({
     name: "use_skill",
-    description: "Read a skill's instructions (its SKILL.md) by name. Use list_skills first to see the available names.",
+    description: "Read a skill's instructions (its SKILL.md) by name. Use list_catalog first to see the available names.",
     input_schema: {
       type: "object",
-      properties: { name: { type: "string", description: "The skill's name, exactly as list_skills shows it" } },
+      properties: { name: { type: "string", description: "The skill's name, exactly as list_catalog shows it" } },
       required: ["name"],
     },
     handler: async (input) => {
@@ -131,11 +143,11 @@ export function createLibraryTools(session: LibrarySession): Tool[] {
       // Guard traversal here: the skills layer joins this straight onto the skills directory, so a
       // name with a path separator or ".." could reach outside it. A skill name is a plain folder name.
       if (name.includes("/") || name.includes("\\") || name === ".." || name.split(/[\\/]/).includes("..")) {
-        throw new Error(`"${name}" is not a skill name: it contains a path separator or "..". Use a plain name as shown by list_skills, such as "writing".`);
+        throw new Error(`"${name}" is not a skill name: it contains a path separator or "..". Use a plain name as shown by list_catalog, such as "writing".`);
       }
       return session.readSkill(name);
     },
   });
 
-  return [reloadTools, addMcpServer, setArtifactEnabled, listSkills, useSkill];
+  return [reloadTools, addMcpServer, setArtifactEnabled, listCatalog, useSkill];
 }

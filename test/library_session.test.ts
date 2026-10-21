@@ -94,36 +94,25 @@ async function makeSession(opts: {
 
 // ---- tests ------------------------------------------------------------------
 
-test("applyBaseline loads only enabled tools; a failing file is a warning not a throw", async () => {
+test("a fresh session loads nothing: enabled baseline tools and servers stay dormant", async () => {
   const root = await tmp();
   const toolsDir = join(root, "tools");
   await mkdir(toolsDir, { recursive: true });
   await writeFile(join(toolsDir, "good.ts"), goodTool("good"));
-  await writeFile(join(toolsDir, "bad.ts"), badTool);
-  // "off.ts" intentionally does NOT exist: a disabled entry must be skipped entirely.
   const manifest: Manifest = {
     entries: [
-      { kind: "tool", name: "good", file: "good.ts", enabled: true },
-      { kind: "tool", name: "off", file: "off.ts", enabled: false },
-      { kind: "tool", name: "bad", file: "bad.ts", enabled: true },
+      { kind: "tool", name: "good", file: "good.ts", enabled: true, description: "a good tool" },
+      { kind: "mcp", name: "srv", server: mkServer("srv"), enabled: true, description: "a server" },
+      { kind: "skill", name: "sk", description: "a skill", enabled: true },
     ],
   };
-  const { session, registry } = await makeSession({ root, manifest });
-  const res = await session.applyBaseline();
-  assert.ok(registry.has("good"), "enabled good tool loaded");
-  assert.ok(!registry.has("off"), "disabled tool skipped");
-  assert.ok(!registry.has("bad"), "failing tool not registered");
-  assert.ok(res.warnings.some((w) => w.includes("bad.ts")), `expected a warning naming bad.ts, got ${JSON.stringify(res.warnings)}`);
-});
-
-test("applyBaseline rejects a manifest tool file that escapes toolsDir (as a warning)", async () => {
-  const root = await tmp();
-  await mkdir(join(root, "tools"), { recursive: true });
-  const manifest: Manifest = { entries: [{ kind: "tool", name: "evil", file: "../evil.ts", enabled: true }] };
-  const { session, registry } = await makeSession({ root, manifest });
-  const res = await session.applyBaseline();
-  assert.ok(!registry.has("evil"));
-  assert.ok(res.warnings.some((w) => /evil|escape|tools/i.test(w)), `expected a traversal warning, got ${JSON.stringify(res.warnings)}`);
+  const { session, registry, starter } = await makeSession({ root, manifest });
+  assert.deepEqual(registry.names(), [], "nothing registered");
+  assert.deepEqual(starter.started, [], "no server started");
+  const inv = session.inventory();
+  assert.deepEqual(inv.find((i) => i.kind === "tool"), { kind: "tool", name: "good", enabled: false, persisted: true, description: "a good tool" });
+  assert.deepEqual(inv.find((i) => i.kind === "mcp"), { kind: "mcp", name: "srv", enabled: false, persisted: true, description: "a server" });
+  assert.equal(inv.find((i) => i.kind === "skill")?.enabled, true, "skill seeds as offered");
 });
 
 test("reloadTools picks up a new file and reports a bad one in failed", async () => {
@@ -156,24 +145,44 @@ test("addServer adds tools and tracks the handle; setEnabled mcp false closes an
   assert.ok(!registry.has("srv__a") && !registry.has("srv__b"), "server tools removed");
 });
 
-test("diff reports a reloaded tool as added and a disabled baseline tool as enabledChanged", async () => {
+test("diff reports a reloaded new tool as added", async () => {
+  const root = await tmp();
+  const toolsDir = join(root, "tools");
+  await mkdir(toolsDir, { recursive: true });
+  await writeFile(join(toolsDir, "fresh.ts"), goodTool("fresh"));
+  const { session } = await makeSession({ root });
+  await session.reloadTools();
+  assert.deepEqual(session.diff(), { added: [{ kind: "tool", name: "fresh" }] });
+});
+
+test("loading and unloading a persisted tool is invisible to diff", async () => {
   const root = await tmp();
   const toolsDir = join(root, "tools");
   await mkdir(toolsDir, { recursive: true });
   await writeFile(join(toolsDir, "base.ts"), goodTool("base"));
-  await writeFile(join(toolsDir, "fresh.ts"), goodTool("fresh"));
-  const manifest: Manifest = { entries: [{ kind: "tool", name: "base", file: "base.ts", enabled: true }] };
+  const manifest: Manifest = { entries: [{ kind: "tool", name: "base", file: "base.ts", enabled: false }] };
   const { session } = await makeSession({ root, manifest });
-  await session.applyBaseline();
-  await session.reloadTools();
+  assert.deepEqual(session.diff().added, []);
+  await session.setEnabled("tool", "base", true);
+  assert.deepEqual(session.diff().added, []);
   await session.setEnabled("tool", "base", false);
-  const d = session.diff();
-  assert.ok(d.added.some((a) => a.kind === "tool" && a.name === "fresh"), `expected fresh in added, got ${JSON.stringify(d.added)}`);
-  assert.ok(!d.added.some((a) => a.name === "base"), "base is persisted, not added");
-  assert.ok(
-    d.enabledChanged.some((c) => c.kind === "tool" && c.name === "base" && c.enabled === false),
-    `expected base disabled in enabledChanged, got ${JSON.stringify(d.enabledChanged)}`,
-  );
+  assert.deepEqual(session.diff().added, []);
+  assert.ok(!("enabledChanged" in session.diff()));
+});
+
+test("persisting a loaded new tool clears diff and writes enabled:false with description", async () => {
+  const root = await tmp();
+  const toolsDir = join(root, "tools");
+  await mkdir(toolsDir, { recursive: true });
+  await writeFile(join(toolsDir, "fresh.ts"), goodTool("fresh", "a fresh tool"));
+  const { session, deps } = await makeSession({ root });
+  await session.reloadTools();
+  await session.persist([{ kind: "tool", name: "fresh" }], deps.paths.manifestPath);
+  assert.deepEqual(session.diff().added, []);
+  assert.equal(session.inventory().find((i) => i.name === "fresh")?.enabled, true, "still loaded");
+  const e = (await loadManifest(deps.paths.manifestPath)).entries[0]!;
+  assert.equal(e.enabled, false);
+  assert.equal(e.description, "a fresh tool");
 });
 
 test("persist writes only the selected overlay entries", async () => {
@@ -190,7 +199,7 @@ test("persist writes only the selected overlay entries", async () => {
   const e = written.entries[0];
   assert.equal(e.kind, "tool");
   assert.equal(e.name, "keep");
-  assert.equal(e.enabled, true);
+  assert.equal(e.enabled, false);
   assert.equal((e as { file: string }).file, "keep.ts");
 });
 
@@ -238,4 +247,74 @@ test("addServer failed replace leaves the prior server running", async () => {
   await session.addServer(mkServer("srv"));
   assert.deepEqual(base.closed, ["srv"], "successful replace closes the old handle");
   assert.ok(registry.has("srv__a"));
+});
+
+test("addServer stores its description and inventory exposes it", async () => {
+  const root = await tmp();
+  await mkdir(join(root, "tools"), { recursive: true });
+  const { session } = await makeSession({ root });
+  await session.addServer(mkServer("rev"), "a reverse-engineering server");
+  assert.equal(session.inventory().find((i) => i.kind === "mcp" && i.name === "rev")?.description, "a reverse-engineering server");
+});
+
+test("reloadTools captures a loaded tool's description into inventory", async () => {
+  const root = await tmp();
+  const toolsDir = join(root, "tools");
+  await mkdir(toolsDir, { recursive: true });
+  await writeFile(join(toolsDir, "hi.ts"), goodTool("hi", "greets"));
+  const { session } = await makeSession({ root });
+  await session.reloadTools();
+  assert.equal(session.inventory().find((i) => i.kind === "tool" && i.name === "hi")?.description, "greets");
+});
+
+test("enabling a cataloged tool captures its loaded description", async () => {
+  const root = await tmp();
+  const toolsDir = join(root, "tools");
+  await mkdir(toolsDir, { recursive: true });
+  await writeFile(join(toolsDir, "hi.ts"), goodTool("hi", "greets"));
+  const manifest: Manifest = { entries: [{ kind: "tool", name: "hi", file: "hi.ts", enabled: true }] };
+  const { session } = await makeSession({ root, manifest });
+  await session.setEnabled("tool", "hi", true);
+  assert.equal(session.inventory().find((i) => i.name === "hi")?.description, "greets");
+});
+
+test("enabling a cataloged tool whose file is missing throws and keeps the entry", async () => {
+  const root = await tmp();
+  await mkdir(join(root, "tools"), { recursive: true });
+  const manifest: Manifest = { entries: [{ kind: "tool", name: "gone", file: "gone.ts", enabled: true }] };
+  const { session } = await makeSession({ root, manifest });
+  await assert.rejects(session.setEnabled("tool", "gone", true), /gone\.ts/);
+  const row = session.inventory().find((i) => i.name === "gone");
+  assert.ok(row);
+  assert.equal(row.enabled, false);
+});
+
+test("enabling a tool whose manifest file escapes toolsDir is rejected and the entry stays cataloged", async () => {
+  const root = await tmp();
+  await mkdir(join(root, "tools"), { recursive: true });
+  await writeFile(join(root, "escape.ts"), goodTool("esc"));
+  const manifest: Manifest = { entries: [{ kind: "tool", name: "esc", file: "../escape.ts", enabled: true }] };
+  const { session, registry } = await makeSession({ root, manifest });
+  await assert.rejects(session.setEnabled("tool", "esc", true), /escapes the tools directory/);
+  assert.equal(registry.has("esc"), false);
+  const row = session.inventory().find((i) => i.name === "esc");
+  assert.ok(row);
+  assert.equal(row.enabled, false);
+});
+
+test("enabling a cataloged mcp whose start rejects surfaces the error and keeps the entry", async () => {
+  const root = await tmp();
+  await mkdir(join(root, "tools"), { recursive: true });
+  const manifest: Manifest = { entries: [{ kind: "mcp", name: "bad", server: mkServer("bad"), enabled: true }] };
+  const { session } = await makeSession({
+    root,
+    manifest,
+    startServer: async () => {
+      throw new Error("spawn failed");
+    },
+  });
+  await assert.rejects(session.setEnabled("mcp", "bad", true), /spawn failed/);
+  const row = session.inventory().find((i) => i.name === "bad");
+  assert.ok(row);
+  assert.equal(row.enabled, false);
 });
