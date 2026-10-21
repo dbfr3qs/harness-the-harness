@@ -195,14 +195,14 @@ test("web_fetch enforces policy changes immediately but only redescribes itself 
   const webFetch = createWebFetchTool({ confirm: async () => true, pageChars: 100, policy: () => c.store.current() });
   const registry = createRegistry([webFetch]);
   const describe = () => registry.definitions()[0]!.description;
-  assert.match(describe(), /The user must approve each fetch/, "the starting policy reads as no policy");
+  assert.match(describe(), /The user approves each fetch \(this is their web policy, editable via \/policy\)/, "the starting policy reads as no policy");
 
   await c.run("deny blocked.test");
   const out = await registry.dispatch("web_fetch", { url: "https://blocked.test/" });
   assert.equal(out.isError, true);
   assert.match(out.content, /blocked\.test is blocked by the web policy \(rule "blocked\.test"\)/, "enforced at once, no network needed");
-  assert.match(describe(), /The user must approve each fetch/, "description unchanged mid-conversation");
+  assert.match(describe(), /The user approves each fetch \(this is their web policy, editable via \/policy\)/, "description unchanged mid-conversation");
 
   webFetch.refreshDescription();
-  assert.match(describe(), /Site access is limited by policy: blocked: blocked\.test; any other site is allowed after the user approves/);
+  assert.match(describe(), /Site access follows the user's web policy, which they configure and can change \(via \/policy\): blocked: blocked\.test; any other site is allowed after the user approves/);
 });

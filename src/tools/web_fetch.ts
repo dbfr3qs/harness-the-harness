@@ -282,8 +282,9 @@ export function createWebFetchTool(opts: WebFetchOptions) {
   const describe = (): string => {
     const policy = currentPolicy();
     const access = policy
-      ? `Site access is limited by policy: ${policy.summary()}. A refused or declined fetch must not be retried.`
-      : "The user must approve each fetch (a declined fetch must not be retried).";
+      ? `Site access follows the user's web policy, which they configure and can change (via /policy): ${policy.summary()}. ` +
+        "A refused fetch reflects that policy, not a fixed limit — do not retry it; if you need a site it blocks, tell the user so they can allow it."
+      : "The user approves each fetch (this is their web policy, editable via /policy); a declined fetch must not be retried.";
     return "Fetch a web page or other text resource over http(s) and return its readable text. Use it when the user asks about the content at a URL " +
       "or you need current information from a specific page. HTML is converted to plain text with links shown as \"text (url)\"; " +
       "long pages are returned in parts, so call again with the offset given at the end to read more. " +
@@ -322,7 +323,7 @@ export function createWebFetchTool(opts: WebFetchOptions) {
         }
         const decision = decide(policy, url, "request");
         if (decision.action === "deny") {
-          throw new Error(`${refusedBy(decision, url)}. ${policy.summary()}. Do not retry; tell the user if you need a different site.`);
+          throw new Error(`${refusedBy(decision, url)}. This is the user's web policy, which they can change: ${policy.summary()}. Do not retry; if you need this site, ask the user to allow it.`);
         }
         action = decision.action;
 

@@ -288,7 +288,7 @@ test("policy allow fetches without asking; deny refuses without asking or connec
   const before = hits.length;
   const denied = await fetch({ url: `${base}/json` });
   assert.equal(denied.isError, true);
-  assert.match(denied.content, /is not on the web policy's list of allowed sites\. allowed without asking: .*any other site is refused\. Do not retry/);
+  assert.match(denied.content, /is not on the web policy's list of allowed sites\. This is the user's web policy, which they can change: allowed without asking: .*any other site is refused\. Do not retry/);
   assert.equal(hits.length, before, "a denied URL never reaches the server");
   assert.deepEqual(asked, []);
   assert.deepEqual(decisions, [`request:allow:http://${local()}/page`, "request:deny:default"]);
@@ -367,10 +367,10 @@ test("denied and declined requests do not use up the fetch budget", async () => 
 });
 
 test("the tool description reflects the policy", () => {
-  assert.match(tool().description, /The user must approve each fetch/);
+  assert.match(tool().description, /The user approves each fetch \(this is their web policy, editable via \/policy\)/);
   const policy = compileWebPolicy({ rules: [{ match: "docs.example.com", action: "allow" }] });
   assert.match(
     tool({ policy }).description,
-    /Site access is limited by policy: allowed without asking: docs\.example\.com; any other site is refused\./,
+    /Site access follows the user's web policy, which they configure and can change \(via \/policy\): allowed without asking: docs\.example\.com; any other site is refused\./,
   );
 });
