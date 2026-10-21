@@ -14,11 +14,18 @@ export interface ClientHooks {
   onRetry?: (info: { attempt: number; delayMs: number; reason: string }) => void;
   onTextDelta?: (text: string) => void; // streaming only: text as it arrives
   onThinkingDelta?: (text: string) => void; // streaming only: readable thinking as it arrives
+  // Streaming only, at most once per model call. onFirstToken fires when the first visible token
+  // (text or thinking) arrives, carrying the prompt size and the time to first token; onStreamDone
+  // fires when the stream completes, carrying the output size and the decode window. A tool-only
+  // call that streams no visible text fires neither.
+  onFirstToken?: (info: { inputTokens: number; ttftMs: number }) => void;
+  onStreamDone?: (info: { outputTokens: number; decodeMs: number }) => void;
 }
 
 export interface ClientDeps {
   fetch?: typeof fetch;
   sleep?: (ms: number) => Promise<void>;
+  now?: () => number; // monotonic clock in ms; injectable for deterministic timing tests
 }
 
 const RETRYABLE_STATUS = new Set([429, 500, 529]);
@@ -44,6 +51,7 @@ export function createAnthropicClient(
 ): ModelFn {
   const doFetch = deps.fetch ?? fetch;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const now = deps.now ?? (() => performance.now());
   const url = `${config.baseUrl}/v1/messages`;
   const { label, keyVar } = PROVIDERS[config.provider];
 
@@ -68,6 +76,7 @@ export function createAnthropicClient(
 
     try {
       touch();
+      const t0 = now(); // request-send time, for time-to-first-token
       let res: Response;
       try {
         res = await doFetch(url, {
@@ -109,7 +118,7 @@ export function createAnthropicClient(
         return { kind: "ok", response: parseResponse(text, label) };
       }
 
-      return await readStream(res, touch, shown, interrupt);
+      return await readStream(res, touch, shown, t0, interrupt);
     } finally {
       clearTimeout(timer);
     }
@@ -119,10 +128,14 @@ export function createAnthropicClient(
     res: Response,
     touch: () => void,
     shown: { value: boolean },
+    t0: number,
     interrupt?: AbortSignal,
   ): Promise<Attempt> {
     if (!res.body) return { kind: "retry", reason: "stream response had no body" };
     const acc = createMessageAccumulator();
+    const timing = Boolean(hooks.onFirstToken || hooks.onStreamDone);
+    let inputTokens = 0;
+    let firstAt: number | undefined; // set when the first visible token arrives (timing only)
     const failed = (reason: string): Attempt => {
       if (shown.value) throw new Error(`${label} API stream failed after output began: ${reason}`);
       return { kind: "retry", reason };
@@ -136,7 +149,14 @@ export function createAnthropicClient(
         } catch {
           throw new StreamProtocolError(`stream sent invalid JSON: ${sse.data.slice(0, 300)}`);
         }
+        if (timing && ev.type === "message_start") {
+          inputTokens = Number((ev.message as { usage?: { input_tokens?: unknown } } | undefined)?.usage?.input_tokens ?? 0);
+        }
         const out = acc.apply(ev);
+        if (timing && firstAt === undefined && (out?.kind === "text" || out?.kind === "thinking")) {
+          firstAt = now();
+          hooks.onFirstToken?.({ inputTokens, ttftMs: firstAt - t0 });
+        }
         if (out?.kind === "text") {
           shown.value = true;
           hooks.onTextDelta?.(out.text);
@@ -156,7 +176,11 @@ export function createAnthropicClient(
     }
 
     try {
-      return { kind: "ok", response: acc.finish() };
+      const response = acc.finish();
+      if (firstAt !== undefined && hooks.onStreamDone) {
+        hooks.onStreamDone({ outputTokens: response.usage.output_tokens, decodeMs: now() - firstAt });
+      }
+      return { kind: "ok", response };
     } catch (err) {
       return failed(err instanceof Error ? err.message : String(err));
     }

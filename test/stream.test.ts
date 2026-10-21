@@ -62,7 +62,7 @@ const end = (stop_reason = "end_turn", output_tokens = 20) => [
   { type: "message_stop" },
 ];
 
-function client(script: Response[], hooks: Parameters<typeof createAnthropicClient>[1] = {}, cfg = config) {
+function client(script: Response[], hooks: Parameters<typeof createAnthropicClient>[1] = {}, cfg = config, now?: () => number) {
   const bodies: unknown[] = [];
   const fetchImpl = (async (_url: string, init: RequestInit) => {
     bodies.push(JSON.parse(String(init.body)));
@@ -73,7 +73,7 @@ function client(script: Response[], hooks: Parameters<typeof createAnthropicClie
     const body = next.body.pipeThrough(new TransformStream(), { signal: init.signal ?? undefined });
     return new Response(body, { status: next.status, headers: next.headers });
   }) as unknown as typeof fetch;
-  const model = createAnthropicClient(cfg, hooks, { fetch: fetchImpl, sleep: async () => {} });
+  const model = createAnthropicClient(cfg, hooks, { fetch: fetchImpl, sleep: async () => {}, now });
   return { model, bodies };
 }
 
@@ -290,4 +290,67 @@ test("spinner draws on a TTY, erases on stop, and does nothing otherwise", () =>
   quiet.start();
   quiet.stop();
   assert.deepEqual(piped, []);
+});
+
+// --- token-speed timing (prefill / decode) ----------------------------------
+
+const clock = (...vals: number[]) => {
+  let i = 0;
+  return () => (i < vals.length ? vals[i++]! : vals[vals.length - 1]!);
+};
+
+test("streaming reports prefill and decode timing via onFirstToken/onStreamDone", async () => {
+  let first: { inputTokens: number; ttftMs: number } | undefined;
+  let done: { outputTokens: number; decodeMs: number } | undefined;
+  const script = sse(start({ usage: { input_tokens: 100, output_tokens: 1 } }), ...textBlock(0, "hi"), ...end("end_turn", 40));
+  const { model } = client(
+    [sseResponse(script)],
+    { onFirstToken: (i) => { first = i; }, onStreamDone: (d) => { done = d; } },
+    config,
+    clock(0, 200, 700),
+  );
+  await model(req);
+  assert.deepEqual(first, { inputTokens: 100, ttftMs: 200 });
+  assert.deepEqual(done, { outputTokens: 40, decodeMs: 500 });
+});
+
+test("non-streaming fires neither timing hook", async () => {
+  let fired = false;
+  const body = JSON.stringify({
+    id: "msg_1", type: "message", role: "assistant", model: "claude-test",
+    content: [{ type: "text", text: "hi" }], stop_reason: "end_turn", stop_sequence: null,
+    usage: { input_tokens: 100, output_tokens: 40 },
+  });
+  const resp = new Response(body, { status: 200, headers: { "content-type": "application/json" } });
+  const { model } = client([resp], { onFirstToken: () => { fired = true; }, onStreamDone: () => { fired = true; } }, { ...config, stream: false });
+  await model(req);
+  assert.equal(fired, false);
+});
+
+test("a tool-only stream fires neither timing hook", async () => {
+  let fired = false;
+  const script = sse(
+    start(),
+    { type: "content_block_start", index: 0, content_block: { type: "tool_use", id: "t1", name: "x", input: {} } },
+    { type: "content_block_delta", index: 0, delta: { type: "input_json_delta", partial_json: "{}" } },
+    { type: "content_block_stop", index: 0 },
+    ...end("tool_use", 5),
+  );
+  const { model } = client([sseResponse(script)], { onFirstToken: () => { fired = true; }, onStreamDone: () => { fired = true; } });
+  await model(req);
+  assert.equal(fired, false);
+});
+
+test("a retry before any token fires onFirstToken exactly once", async () => {
+  let firstCount = 0;
+  let doneCount = 0;
+  const errored = sse(start(), { type: "error", error: { type: "overloaded_error", message: "busy" } });
+  const clean = sse(start({ usage: { input_tokens: 100, output_tokens: 1 } }), ...textBlock(0, "hi"), ...end("end_turn", 40));
+  const { model } = client(
+    [sseResponse(errored), sseResponse(clean)],
+    { onFirstToken: () => { firstCount++; }, onStreamDone: () => { doneCount++; } },
+  );
+  await model(req);
+  assert.equal(firstCount, 1);
+  assert.equal(doneCount, 1);
 });
