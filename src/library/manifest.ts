@@ -10,6 +10,7 @@ export interface ToolEntry {
   kind: "tool";
   name: string;
   file: string; // relative to toolsDir
+  description?: string;
   enabled: boolean;
 }
 export interface SkillEntry {
@@ -22,6 +23,7 @@ export interface McpEntry {
   kind: "mcp";
   name: string;
   server: McpServerConfig;
+  description?: string;
   enabled: boolean;
 }
 export type ManifestEntry = ToolEntry | SkillEntry | McpEntry;
@@ -32,9 +34,9 @@ export interface Manifest {
 }
 
 const ENTRY_KEYS: Record<ArtifactKind, string[]> = {
-  tool: ["kind", "name", "file", "enabled"],
+  tool: ["kind", "name", "file", "description", "enabled"],
   skill: ["kind", "name", "description", "enabled"],
-  mcp: ["kind", "name", "server", "enabled"],
+  mcp: ["kind", "name", "server", "description", "enabled"],
 };
 
 /** Checks parsed JSON and returns a Manifest, or throws ConfigError naming the problem. */
@@ -66,15 +68,19 @@ export function parseManifest(json: unknown, source: string): Manifest {
 
     if (kind === "tool") {
       if (typeof e.file !== "string" || e.file.trim() === "") fail(`"${at}.file" must be a non-empty string`);
-      return { kind, name, file: e.file as string, enabled };
+      if (e.description !== undefined && typeof e.description !== "string") fail(`"${at}.description" must be a string`);
+      if (e.description === undefined) return { kind, name, file: e.file as string, enabled };
+      return { kind, name, file: e.file as string, description: e.description as string, enabled };
     }
     if (kind === "skill") {
       if (typeof e.description !== "string") fail(`"${at}.description" must be a string`);
       return { kind, name, description: e.description as string, enabled };
     }
     // mcp: reuse the mcp.json rules by wrapping the one server.
+    if (e.description !== undefined && typeof e.description !== "string") fail(`"${at}.description" must be a string`);
     const [server] = parseMcpConfig({ mcpServers: { [name]: e.server } }, `${source}: ${at}.server`);
-    return { kind: "mcp", name, server, enabled };
+    if (e.description === undefined) return { kind: "mcp", name, server, enabled };
+    return { kind: "mcp", name, server, description: e.description as string, enabled };
   });
   return { entries };
 }
@@ -101,7 +107,8 @@ export function formatManifest(m: Manifest): string {
   const entries = m.entries.map((e) => {
     if (e.kind !== "mcp") return e;
     const { name: _name, ...server } = e.server; // the entry's name is the server's name
-    return { kind: e.kind, name: e.name, server, enabled: e.enabled };
+    const description = e.description === undefined ? {} : { description: e.description };
+    return { kind: e.kind, name: e.name, server, ...description, enabled: e.enabled };
   });
   return `${JSON.stringify({ entries }, null, 2)}\n`;
 }
