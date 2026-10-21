@@ -227,3 +227,73 @@ test("addServer failed replace leaves the prior server running", async () => {
   assert.deepEqual(base.closed, ["srv"], "successful replace closes the old handle");
   assert.ok(registry.has("srv__a"));
 });
+
+test("addServer stores its description and inventory exposes it", async () => {
+  const root = await tmp();
+  await mkdir(join(root, "tools"), { recursive: true });
+  const { session } = await makeSession({ root });
+  await session.addServer(mkServer("rev"), "a reverse-engineering server");
+  assert.equal(session.inventory().find((i) => i.kind === "mcp" && i.name === "rev")?.description, "a reverse-engineering server");
+});
+
+test("reloadTools captures a loaded tool's description into inventory", async () => {
+  const root = await tmp();
+  const toolsDir = join(root, "tools");
+  await mkdir(toolsDir, { recursive: true });
+  await writeFile(join(toolsDir, "hi.ts"), goodTool("hi", "greets"));
+  const { session } = await makeSession({ root });
+  await session.reloadTools();
+  assert.equal(session.inventory().find((i) => i.kind === "tool" && i.name === "hi")?.description, "greets");
+});
+
+test("enabling a cataloged tool captures its loaded description", async () => {
+  const root = await tmp();
+  const toolsDir = join(root, "tools");
+  await mkdir(toolsDir, { recursive: true });
+  await writeFile(join(toolsDir, "hi.ts"), goodTool("hi", "greets"));
+  const manifest: Manifest = { entries: [{ kind: "tool", name: "hi", file: "hi.ts", enabled: true }] };
+  const { session } = await makeSession({ root, manifest });
+  await session.setEnabled("tool", "hi", true);
+  assert.equal(session.inventory().find((i) => i.name === "hi")?.description, "greets");
+});
+
+test("enabling a cataloged tool whose file is missing throws and keeps the entry", async () => {
+  const root = await tmp();
+  await mkdir(join(root, "tools"), { recursive: true });
+  const manifest: Manifest = { entries: [{ kind: "tool", name: "gone", file: "gone.ts", enabled: true }] };
+  const { session } = await makeSession({ root, manifest });
+  await assert.rejects(session.setEnabled("tool", "gone", true), /gone\.ts/);
+  const row = session.inventory().find((i) => i.name === "gone");
+  assert.ok(row);
+  assert.equal(row.enabled, false);
+});
+
+test("enabling a tool whose manifest file escapes toolsDir is rejected and the entry stays cataloged", async () => {
+  const root = await tmp();
+  await mkdir(join(root, "tools"), { recursive: true });
+  await writeFile(join(root, "escape.ts"), goodTool("esc"));
+  const manifest: Manifest = { entries: [{ kind: "tool", name: "esc", file: "../escape.ts", enabled: true }] };
+  const { session, registry } = await makeSession({ root, manifest });
+  await assert.rejects(session.setEnabled("tool", "esc", true), /escapes the tools directory/);
+  assert.equal(registry.has("esc"), false);
+  const row = session.inventory().find((i) => i.name === "esc");
+  assert.ok(row);
+  assert.equal(row.enabled, false);
+});
+
+test("enabling a cataloged mcp whose start rejects surfaces the error and keeps the entry", async () => {
+  const root = await tmp();
+  await mkdir(join(root, "tools"), { recursive: true });
+  const manifest: Manifest = { entries: [{ kind: "mcp", name: "bad", server: mkServer("bad"), enabled: true }] };
+  const { session } = await makeSession({
+    root,
+    manifest,
+    startServer: async () => {
+      throw new Error("spawn failed");
+    },
+  });
+  await assert.rejects(session.setEnabled("mcp", "bad", true), /spawn failed/);
+  const row = session.inventory().find((i) => i.name === "bad");
+  assert.ok(row);
+  assert.equal(row.enabled, false);
+});

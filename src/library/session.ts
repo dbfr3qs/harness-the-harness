@@ -22,7 +22,7 @@ export interface LibrarySession {
   /** Scan toolsDir and (re)load every tool file into the registry. Does not touch the manifest. */
   reloadTools(): Promise<{ loaded: string[]; failed: { file: string; error: string }[] }>;
   /** Start a server, register its tools, track the handle. Throws (adding nothing) on failure. */
-  addServer(server: McpServerConfig): Promise<{ tools: string[]; instructions?: string }>;
+  addServer(server: McpServerConfig, description?: string): Promise<{ tools: string[]; instructions?: string }>;
   /** Session-only enable/disable. Returns a human-readable line. */
   setEnabled(kind: ArtifactKind, name: string, enabled: boolean): Promise<string>;
   listSkills(): SkillInfo[];
@@ -137,7 +137,7 @@ export async function createLibrarySession(deps: LibrarySessionDeps): Promise<Li
           if (tools.has(name) && registry.has(name)) registry.remove(name);
           registry.add(tool);
           const prior = tools.get(name);
-          tools.set(name, { enabled: true, persisted: prior?.persisted ?? false, file, manifestFile: prior?.manifestFile });
+          tools.set(name, { enabled: true, persisted: prior?.persisted ?? false, file, manifestFile: prior?.manifestFile, description: tool.description });
           seen.add(name);
           loaded.push(name);
         } catch (err) {
@@ -147,10 +147,10 @@ export async function createLibrarySession(deps: LibrarySessionDeps): Promise<Li
       return { loaded, failed };
     },
 
-    async addServer(server) {
+    async addServer(server, description) {
       const existing = mcps.get(server.name);
       const persisted = existing?.persisted ?? false;
-      const rec: McpRec = { enabled: false, persisted, server, toolNames: [] };
+      const rec: McpRec = { enabled: false, persisted, server, toolNames: [], description: description ?? existing?.description };
       // Start the replacement FIRST so a failure leaves any running same-named server untouched.
       let handle: StartedServer;
       try {
@@ -202,6 +202,7 @@ export async function createLibrarySession(deps: LibrarySessionDeps): Promise<Li
           if (registry.has(name)) registry.remove(name);
           registry.add(tool);
           rec.file = abs;
+          rec.description = tool.description;
           rec.enabled = true;
           return `Enabled tool "${name}".`;
         }
