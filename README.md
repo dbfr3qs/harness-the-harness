@@ -340,22 +340,28 @@ In unattended mode the model can give itself new capabilities mid-task: write a 
   skills/<name>/SKILL.md written how-tos the model can read
 ```
 
-There are two layers, and only a person can change the lower one:
+The library is a **catalog**. Two words describe every item in it:
 
-- **The session overlay.** The model's changes (loading a tool, starting a server, enabling or disabling something) apply to the current session only and vanish when it ends.
-- **The persisted library.** At startup the harness loads what `manifest.json` lists. Only you change it, with `/library persist`. **The model has no persist tool.** If you quit with unpersisted changes, the harness prints an alert saying they will be gone next session.
+- **Installed** means the item is in the catalog. An installed item costs no context: its tool definitions are not in the live tool set, and its server is not running.
+- **Loaded** means the item is active in the session: a tool in the live tool set, a server that is running, or a skill that is offered.
 
-Changing the tool set rewrites the tool definitions, which resets the prompt cache, so the next turn costs more. The tool results tell the model to reload once, not after each edit.
+A fresh session loads **only the built-in tools**. Nothing from the library loads at startup, not even what was persisted. The model browses the catalog and loads what it needs:
+
+- Persisted tools and MCP servers are **dormant**. They stay in the catalog and load on demand with `set_artifact_enabled`; they do not start with the session.
+- Changes the model makes (loading or unloading an item, installing a new one) apply to the current session only. Loading and unloading is not a persistable change, so it never triggers the quit-time alert.
+- Only **new installs** (a tool, server or skill that is not yet in `manifest.json`) are persistable. The human saves them with `/library persist`. **The model has no persist tool.** If you quit with new installs that are not persisted, the harness prints an alert saying they will be gone next session.
+
+Changing the tool set rewrites the tool definitions, which resets the prompt cache, so the next turn costs more. The tool results tell the model to load or reload once, not after each edit.
 
 **Model tools:**
 
 | Tool | Does |
 | ---- | ---- |
-| `reload_tools` | Rescans the library's `tools/` directory and (re)loads every tool file into the session; reports which loaded and which failed, with the reason |
-| `add_mcp_server` | Starts an MCP server (`name`, `command`, optional `args` and `env`) for this session and registers its tools. The description tells the model to prefer a reputable existing server (a Ghidra MCP, say) over building its own for anything substantial |
-| `set_artifact_enabled` | Enables or disables one tool, skill or MCP server (`kind`, `name`, `enabled`) for this session |
-| `list_skills` | Lists the available skills, one line each |
-| `use_skill` | Returns a skill's `SKILL.md` by name |
+| `list_catalog` | Lists what is installed: each tool and MCP server with its kind, name, description, and whether it is `[loaded]` or `[available]`; then the skills that are offered. This is how the model discovers what it has |
+| `set_artifact_enabled` | Loads or unloads one tool, skill or MCP server (`kind`, `name`, `enabled`) for this session |
+| `run_shell` + `reload_tools` | Authoring a tool: the model writes a `.ts` file into the library's `tools/` directory with `run_shell` (`write_file` cannot reach it), then `reload_tools` rescans that directory and loads every tool file, reporting which loaded and which failed, with the reason. A written tool is installed at once and loads with `reload_tools` |
+| `add_mcp_server` | Installs an MCP server (`name`, `command`, optional `args`, `env` and `description`) and starts it, registering its tools for this session. The description tells the model to prefer a reputable existing server (a Ghidra MCP, say) over building its own for anything substantial, and the optional `description` is what `list_catalog` shows for it |
+| `use_skill` | Returns a skill's `SKILL.md` by name. Skills are written how-tos: the model reads one before a task it covers |
 
 **Your commands:**
 
@@ -368,7 +374,7 @@ Changing the tool set rewrites the tool definitions, which resets the prompt cac
 /library persist          show them, ask [y/n], then write them to manifest.json
 ```
 
-The lists mark each item `persisted` or `session-only`. `/library persist` is the only path that writes the manifest, and it saves every change shown. The commands exist only in unattended mode; in normal mode they are unknown commands. Persisting a tool copies its file into the library's `tools/` directory.
+The lists mark each item `persisted` or `session-only`. `/library persist` is the only path that writes the manifest: it shows the new installs, asks once, and saves them all. Loading or unloading an item for the session is not saved by it. The commands exist only in unattended mode; in normal mode they are unknown commands. Persisting a tool copies its file into the library's `tools/` directory.
 
 **The tool-file contract.** A native tool is a `.ts` file directly in the library's `tools/` directory whose default export is a factory `(deps) => Tool`. It imports **no harness code**: everything it needs arrives in `deps`, which has `defineTool`, `workspaceRoot` (the workspace path) and `privatePaths` (paths the file tools must not touch).
 
