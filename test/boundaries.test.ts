@@ -56,7 +56,7 @@ const stubWebFetch: Tool = {
 // can too) must only ever appear in unattended mode. Stubs stand in for them here so we can assert
 // the exact unattended set and their order without pulling in a real LibrarySession.
 const libStub = (name: string): Tool => ({ ...stubWebFetch, name });
-const libraryTools: Tool[] = ["reload_tools", "add_mcp_server", "set_artifact_enabled", "list_skills", "use_skill"].map(libStub);
+const libraryTools: Tool[] = ["reload_tools", "add_mcp_server", "set_artifact_enabled", "list_catalog", "use_skill"].map(libStub);
 const libraryNames = libraryTools.map((t) => t.name);
 const build = (unattended: boolean) =>
   assembleTools({ workspaceRoot: "/tmp", privatePaths: [], webFetch: stubWebFetch, unattended, libraryTools: unattended ? libraryTools : [] }).map((t) => t.name);

@@ -13,21 +13,23 @@ import type { SkillInfo } from "../src/library/skills.ts";
 interface Calls {
   reloadTools: number;
   addServer: McpServerConfig[];
+  addDescriptions: (string | undefined)[];
   setEnabled: { kind: ArtifactKind; name: string; enabled: boolean }[];
   listSkills: number;
   readSkill: string[];
 }
 
 function fakeSession(overrides: Partial<LibrarySession> = {}): { session: LibrarySession; calls: Calls } {
-  const calls: Calls = { reloadTools: 0, addServer: [], setEnabled: [], listSkills: 0, readSkill: [] };
+  const calls: Calls = { reloadTools: 0, addServer: [], addDescriptions: [], setEnabled: [], listSkills: 0, readSkill: [] };
   const base: LibrarySession = {
     toolsDir: "/home/u/.harness/library/tools",
     async reloadTools() {
       calls.reloadTools++;
       return { loaded: ["alpha", "beta"], failed: [] };
     },
-    async addServer(server) {
+    async addServer(server, description) {
       calls.addServer.push(server);
+      calls.addDescriptions.push(description);
       return { tools: [`${server.name}__a`], instructions: `drive ${server.name} like so` };
     },
     async setEnabled(kind, name, enabled) {
@@ -64,7 +66,7 @@ const find = (session: LibrarySession, name: string) => {
 test("createLibraryTools exposes exactly the model tools, and no persist tool", () => {
   const { session } = fakeSession();
   const names = createLibraryTools(session).map((t) => t.name);
-  assert.deepEqual(names, ["reload_tools", "add_mcp_server", "set_artifact_enabled", "list_skills", "use_skill"]);
+  assert.deepEqual(names, ["reload_tools", "add_mcp_server", "set_artifact_enabled", "list_catalog", "use_skill"]);
   assert.ok(!names.includes("persist"), "there is no persist tool");
 });
 
@@ -121,12 +123,45 @@ test("set_artifact_enabled dispatches to session.setEnabled", async () => {
   assert.match(out, /alpha/);
 });
 
-test("list_skills dispatches to session.listSkills and lists names and descriptions", async () => {
+test("list_skills is gone; list_catalog replaces it", () => {
+  const { session } = fakeSession();
+  const names = createLibraryTools(session).map((t) => t.name);
+  assert.ok(names.includes("list_catalog"));
+  assert.ok(!names.includes("list_skills"));
+});
+
+test("list_catalog shows loaded/available tools and mcp, enabled skills, and hides disabled skills", async () => {
+  const { session } = fakeSession({
+    inventory: () => [
+      { kind: "tool", name: "alpha", enabled: true, persisted: true, description: "does alpha things" },
+      { kind: "mcp", name: "rea", enabled: false, persisted: true, description: "reverse engineering" },
+      { kind: "tool", name: "bare", enabled: false, persisted: false },
+      { kind: "skill", name: "writing", enabled: true, persisted: true, description: "how to write" },
+      { kind: "skill", name: "secret", enabled: false, persisted: true, description: "hidden skill" },
+    ],
+  });
+  const out = await find(session, "list_catalog").handler({}, ctx);
+  assert.match(out, /tool alpha \[loaded\]: does alpha things/);
+  assert.match(out, /mcp rea \[available\]: reverse engineering/);
+  assert.match(out, /tool bare \[available\]/);
+  assert.doesNotMatch(out, /undefined/);
+  assert.doesNotMatch(out, /bare \[available\]:/);
+  assert.match(out, /skill writing: how to write/);
+  assert.doesNotMatch(out, /skill writing \[/);
+  assert.doesNotMatch(out, /secret/);
+});
+
+test("list_catalog with nothing to show says nothing is installed", async () => {
+  const { session } = fakeSession();
+  assert.equal(await find(session, "list_catalog").handler({}, ctx), "No tools, servers, or skills are installed yet.");
+  const hidden = fakeSession({ inventory: () => [{ kind: "skill", name: "s", enabled: false, persisted: true }] }).session;
+  assert.equal(await find(hidden, "list_catalog").handler({}, ctx), "No tools, servers, or skills are installed yet.");
+});
+
+test("add_mcp_server forwards its description to session.addServer", async () => {
   const { session, calls } = fakeSession();
-  const out = await find(session, "list_skills").handler({}, ctx);
-  assert.equal(calls.listSkills, 1);
-  assert.match(out, /writing/);
-  assert.match(out, /how to write/);
+  await find(session, "add_mcp_server").handler({ name: "rea", command: "rea-server", description: "reverse engineering" }, ctx);
+  assert.deepEqual(calls.addDescriptions, ["reverse engineering"]);
 });
 
 test("use_skill dispatches to session.readSkill", async () => {
