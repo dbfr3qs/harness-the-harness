@@ -1,4 +1,4 @@
-import { chmod, mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rename, unlink, writeFile } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve } from "node:path";
 import { ConfigError } from "./config.ts";
 import type { Config } from "./config.ts";
@@ -99,11 +99,16 @@ export function createSessionStore(
       const body = text;
       queue = queue
         .then(async () => {
-          await mkdir(dir, { recursive: true });
           const tmp = `${file}.${process.pid}.tmp`;
-          await writeFile(tmp, body, { encoding: "utf8", mode: 0o600 });
-          await chmod(tmp, 0o600);
-          await rename(tmp, file);
+          try {
+            await mkdir(dir, { recursive: true });
+            await writeFile(tmp, body, { encoding: "utf8", mode: 0o600 });
+            await chmod(tmp, 0o600);
+            await rename(tmp, file);
+          } catch (err) {
+            await unlink(tmp).catch(() => {});
+            throw err;
+          }
         })
         .catch(onError);
     },

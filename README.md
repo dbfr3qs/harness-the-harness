@@ -491,7 +491,7 @@ Resume with `npm start -- --resume <uuid>`, `--resume=<uuid>`, or the `HARNESS_R
 - **The web policy**, including `/policy` edits that were not saved to the policy file.
 - **In unattended mode**, the loaded tools, MCP servers and skills. The servers are relaunched. A session resumes in the mode it was saved in: an unattended session resumes unattended, and a normal one resumes normal.
 
-Restore is best effort. If a tool file is missing or has changed, or an MCP server won't relaunch, the harness warns, restores everything else, and tells the model which tools are unavailable.
+Restore is best effort. If a tool file is missing or an MCP server won't relaunch, the harness warns, restores everything else, and tells the model that artifact is unavailable; if a tool file has changed since it was saved, the harness warns and loads the current version.
 
 **Secrets.** The provider API key is never written to a session file. An MCP server's `env` is stored, as the library manifest already stores it. That is why session files are written mode `0600`, are git-ignored, and are neither readable nor writable by the model's file tools (`sessions/` is a private path, like the transcripts).
 
