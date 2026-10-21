@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLibrarySession } from "../src/library/session.ts";
@@ -202,4 +202,40 @@ test("closeAll closes every tracked server handle", async () => {
   await session.addServer(mkServer("two"));
   session.closeAll();
   assert.deepEqual(starter.closed.sort(), ["one", "two"]);
+});
+
+test("persist leaves a tool already in toolsDir untouched and records it by basename", async () => {
+  // The copyFile branch (source outside toolsDir) is defensive: sessions only load from toolsDir,
+  // so a rec.file outside it is unreachable through the public API.
+  const root = await tmp();
+  const toolsDir = join(root, "tools");
+  await mkdir(toolsDir, { recursive: true });
+  await writeFile(join(toolsDir, "inplace.ts"), goodTool("inplace"));
+  const { session, deps } = await makeSession({ root });
+  await session.reloadTools();
+  await session.persist([{ kind: "tool", name: "inplace" }], deps.paths.manifestPath);
+  assert.equal(await readFile(join(toolsDir, "inplace.ts"), "utf8"), goodTool("inplace"));
+  const e = (await loadManifest(deps.paths.manifestPath)).entries[0] as { file: string };
+  assert.equal(e.file, "inplace.ts");
+});
+
+test("addServer failed replace leaves the prior server running", async () => {
+  const root = await tmp();
+  await mkdir(join(root, "tools"), { recursive: true });
+  let fail = false;
+  const base = fakeStartServer();
+  const startServer = async (s: McpServerConfig) => {
+    if (fail) throw new Error("spawn failed");
+    return base.startServer(s);
+  };
+  const { session, registry } = await makeSession({ root, startServer });
+  await session.addServer(mkServer("srv"));
+  fail = true;
+  await assert.rejects(session.addServer(mkServer("srv")), /spawn failed/);
+  assert.ok(registry.has("srv__a") && registry.has("srv__b"), "prior server's tools survive");
+  assert.deepEqual(base.closed, [], "prior server was not closed");
+  fail = false;
+  await session.addServer(mkServer("srv"));
+  assert.deepEqual(base.closed, ["srv"], "successful replace closes the old handle");
+  assert.ok(registry.has("srv__a"));
 });

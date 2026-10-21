@@ -6,7 +6,7 @@ export interface CompletionState {
   policyPatterns: string[]; // patterns of the web policy's rules, in order
 }
 
-export const COMMANDS = ["/exit", "/reset", "/history", "/policy", "/provider", "/model", "/thinking", "/turns", "/maxtokens", "/defaults", "/context"];
+export const COMMANDS = ["/exit", "/reset", "/history", "/policy", "/provider", "/model", "/thinking", "/turns", "/maxtokens", "/defaults", "/context", "/tools", "/skills", "/mcp", "/library"];
 const POLICY_SUBCOMMANDS = ["show", "help", "allow", "ask", "deny", "remove", "default", "limit", "save", "reload"];
 const ACTIONS = ["allow", "ask", "deny"];
 

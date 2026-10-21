@@ -13,12 +13,15 @@ export interface ToolFactoryDeps {
 
 export type ToolFactory = (deps: ToolFactoryDeps) => Tool;
 
+// A monotonic counter, not Date.now(): two loads within one millisecond must not share a ?v= query.
+let loadCounter = 0;
+
 /**
  * Imports a tool file fresh (the query string defeats the module cache, so an edited file is
  * re-read), calls its default-exported factory, and checks the result is a usable Tool.
  */
 export async function loadToolFile(file: string, deps: ToolFactoryDeps): Promise<Tool> {
-  const mod = await import(pathToFileURL(file).href + "?v=" + Date.now());
+  const mod = await import(pathToFileURL(file).href + "?v=" + ++loadCounter);
   const factory = mod.default;
   if (factory === undefined) {
     throw new Error(`${file} has no default export. Write \`export default (deps) => deps.defineTool({ name, description, input_schema, handler })\`.`);

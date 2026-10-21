@@ -43,12 +43,14 @@ export function createLibraryTools(session: LibrarySession): Tool[] {
   const reloadTools = defineTool({
     name: "reload_tools",
     description:
-      "Rescan the tools directory and (re)load every tool file into this session, picking up files you just wrote with write_file. " +
+      `Rescan the library tools directory (${session.toolsDir}) and (re)load every tool file into this session. ` +
+      `Author a tool by writing a .ts file into that directory with run_shell (write_file cannot reach it: it only writes inside the workspace). ` +
       "Reports which tools loaded and which files failed (with the reason). Call it after writing or editing a tool file.",
     input_schema: { type: "object", properties: {} },
     handler: async () => {
       const { loaded, failed } = await session.reloadTools();
       const lines: string[] = [];
+      lines.push(`Tools directory: ${session.toolsDir} (write tool files here with run_shell).`);
       lines.push(loaded.length ? `Loaded ${loaded.length} tool(s): ${loaded.join(", ")}.` : "No tools loaded.");
       if (failed.length) {
         lines.push(`Failed to load ${failed.length} file(s):`);

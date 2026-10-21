@@ -21,6 +21,7 @@ interface Calls {
 function fakeSession(overrides: Partial<LibrarySession> = {}): { session: LibrarySession; calls: Calls } {
   const calls: Calls = { reloadTools: 0, addServer: [], setEnabled: [], listSkills: 0, readSkill: [] };
   const base: LibrarySession = {
+    toolsDir: "/home/u/.harness/library/tools",
     async applyBaseline() {
       return { notes: [], warnings: [] };
     },
@@ -148,4 +149,14 @@ test("use_skill rejects a traversing name before calling readSkill", async () =>
     );
     assert.equal(calls.readSkill.length, 0, `readSkill must not be called for "${bad}"`);
   }
+});
+
+test("reload_tools names the tools directory and steers the model to run_shell, not write_file", async () => {
+  const { session } = fakeSession();
+  const tool = find(session, "reload_tools");
+  assert.ok(tool.description.includes("/home/u/.harness/library/tools"));
+  assert.ok(tool.description.includes("run_shell"));
+  assert.ok(!/with write_file/.test(tool.description), "does not tell the model to author with write_file");
+  const out = await tool.handler({}, ctx);
+  assert.ok(String(out).includes("/home/u/.harness/library/tools"));
 });

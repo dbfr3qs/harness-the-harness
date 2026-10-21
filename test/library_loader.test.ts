@@ -30,7 +30,6 @@ test("cache-bust: an edited file re-imports fresh", async () => {
   const f = join(d, "echo.ts");
   await writeFile(f, src("old description"));
   assert.equal((await loadToolFile(f, deps)).description, "old description");
-  await new Promise((r) => setTimeout(r, 5));
   await writeFile(f, src("new description"));
   assert.equal((await loadToolFile(f, deps)).description, "new description");
 });
@@ -67,4 +66,13 @@ test("scanToolsDir lists direct .ts files only; missing dir is []", async () => 
   await writeFile(join(d, "sub", "c.ts"), "");
   assert.deepEqual(await scanToolsDir(d), [join(d, "a.ts")]);
   assert.deepEqual(await scanToolsDir(join(d, "nope")), []);
+});
+
+test("cache-bust: back-to-back rewrites with no delay still re-import fresh", async () => {
+  const d = await tmp();
+  const f = join(d, "echo.ts");
+  for (let i = 0; i < 5; i++) {
+    await writeFile(f, src(`v${i}`));
+    assert.equal((await loadToolFile(f, deps)).description, `v${i}`);
+  }
 });

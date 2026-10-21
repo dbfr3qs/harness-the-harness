@@ -1,4 +1,4 @@
-import { rename } from "node:fs/promises";
+import { copyFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import type { Tool } from "../registry.ts";
 import type { McpServerConfig } from "../mcp/config.ts";
@@ -17,6 +17,8 @@ export interface LibrarySessionDeps {
 }
 
 export interface LibrarySession {
+  /** Absolute path of the tools directory, where authored tool files belong. */
+  readonly toolsDir: string;
   /** Load the manifest's enabled tools, start its enabled servers, record its enabled skills. */
   applyBaseline(): Promise<{ notes: string[]; warnings: string[] }>;
   /** Scan toolsDir and (re)load every tool file into the registry. Does not touch the manifest. */
@@ -116,6 +118,7 @@ export async function createLibrarySession(deps: LibrarySessionDeps): Promise<Li
   }
 
   const session: LibrarySession = {
+    toolsDir,
     async applyBaseline() {
       const notes: string[] = [];
       const warnings: string[] = [];
@@ -178,15 +181,45 @@ export async function createLibrarySession(deps: LibrarySessionDeps): Promise<Li
     async addServer(server) {
       const existing = mcps.get(server.name);
       const persisted = existing?.persisted ?? false;
-      if (existing) disableServer(existing); // replace a running server of the same name
       const rec: McpRec = { enabled: false, persisted, server, toolNames: [] };
+      // Start the replacement FIRST so a failure leaves any running same-named server untouched.
+      let handle: StartedServer;
       try {
-        const handle = await startAndRegister(rec);
-        mcps.set(server.name, rec);
-        return { tools: rec.toolNames, ...(handle.instructions ? { instructions: handle.instructions } : {}) };
+        handle = await startServer(server);
       } catch (err) {
         throw new Error(`Could not add MCP server "${server.name}": ${message(err)}. Nothing was added.`);
       }
+      // Swap: take the old server's tools out, register the new ones, and put the old back if that fails.
+      const oldNames = existing ? [...existing.toolNames] : [];
+      const oldTools = new Map<string, Tool>();
+      if (existing) {
+        for (const t of existing.handle?.tools ?? []) oldTools.set(t.name, t);
+        removeServerTools(existing);
+      }
+      const added: string[] = [];
+      try {
+        for (const t of handle.tools) {
+          registry.add(t);
+          added.push(t.name);
+        }
+      } catch (err) {
+        for (const n of added) if (registry.has(n)) registry.remove(n);
+        handle.close();
+        if (existing) {
+          for (const n of oldNames) {
+            const t = oldTools.get(n);
+            if (t && !registry.has(n)) registry.add(t);
+          }
+          existing.toolNames = oldNames;
+        }
+        throw new Error(`Could not add MCP server "${server.name}": ${message(err)}. Nothing was added.`);
+      }
+      if (existing?.handle) existing.handle.close();
+      rec.handle = handle;
+      rec.toolNames = added;
+      rec.enabled = true;
+      mcps.set(server.name, rec);
+      return { tools: rec.toolNames, ...(handle.instructions ? { instructions: handle.instructions } : {}) };
     },
 
     async setEnabled(kind, name, enabled) {
@@ -320,7 +353,7 @@ export async function createLibrarySession(deps: LibrarySessionDeps): Promise<Li
         if (!rec.file) throw new Error(`Cannot persist tool "${name}": its file is unknown.`);
         const dest = join(toolsDir, basename(rec.file));
         if (resolve(rec.file) !== resolve(dest)) {
-          await rename(rec.file, dest);
+          await copyFile(rec.file, dest);
           rec.file = dest;
         }
         file = basename(dest);
