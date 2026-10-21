@@ -471,6 +471,8 @@ async function main(): Promise<void> {
   const store = createSessionStore(resolve(config.workspaceRoot, sessionsDir), { secrets: config.secrets });
   let saved = false;
   const saveSession = () => {
+    // Mid-run, `messages` may end on a tool_use with no result: keep the last completed-run save.
+    if (running) return;
     store.save(
       buildSessionState({
         config,
@@ -482,6 +484,10 @@ async function main(): Promise<void> {
       }),
     );
     saved = true;
+  };
+  // On exit, save only if a run completed or an earlier save happened (a zero-run session leaves no file).
+  const saveOnExit = () => {
+    if (messages.length || saved) saveSession();
   };
   const resumeLine = () => (saved ? `Resume this session: npm start -- --resume ${sessionId}  (saved to ${store.path(sessionId)})\n` : "");
   const lastModel = new Map<Provider, string>(); // per provider, for /provider switching back
@@ -540,7 +546,7 @@ async function main(): Promise<void> {
   const quit = () => {
     endThinking();
     term.endLine();
-    saveSession();
+    saveOnExit();
     librarySession?.closeAll();
     const alert = unpersistedLibraryAlert();
     if (alert) term.write(`${alert}\n`);
@@ -973,7 +979,7 @@ async function main(): Promise<void> {
     term.ready();
   }
 
-  saveSession();
+  saveOnExit();
   librarySession?.closeAll();
   const exitAlert = unpersistedLibraryAlert();
   if (exitAlert) say(exitAlert);
