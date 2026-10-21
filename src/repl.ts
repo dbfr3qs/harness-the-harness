@@ -12,6 +12,7 @@ import type { ContextReading } from "./context_meter.ts";
 import type { ClientHooks } from "./client.ts";
 import { COMMANDS } from "./complete.ts";
 import type { CompletionState } from "./complete.ts";
+import { formatSpeed, tokensPerSec } from "./token_speed.ts";
 import { ConfigError, isProvider, loadConfig, PROVIDERS, providerSettings } from "./config.ts";
 import type { Config, Provider } from "./config.ts";
 import { runModelCommand, runProviderCommand } from "./model_command.ts";
@@ -260,6 +261,11 @@ async function main(): Promise<void> {
   let contextUsed = 0;
   let contextStale: string | undefined; // set after a switch, until the next response re-measures
   let streamedChars = 0; // text and thinking streamed in the current response, for a live estimate
+  // Token-speed for the status bar (most-recent model call). prefill is set once at the first token;
+  // decode is estimated from streamedChars while decodeStart is set, then snapped to the exact rate.
+  let speedPrefill: number | undefined;
+  let speedDecode: number | undefined;
+  let decodeStart: number | undefined;
   let windowNow: number | undefined;
   let turnsThisRun = 0;
   const pendingInput: string[] = []; // sent while busy; delivered at the model's next step
@@ -276,6 +282,8 @@ async function main(): Promise<void> {
     if (running) parts.push(`turn ${turnsThisRun}${Number.isFinite(config.maxTurns) ? `/${config.maxTurns}` : ""}`);
     if (pendingInput.length) parts.push(`${pendingInput.length} queued for the next step`);
     if (config.showThinking) parts.push("thinking shown");
+    const decode = speedDecode ?? (decodeStart !== undefined ? tokensPerSec(Math.ceil(streamedChars / 4), performance.now() - decodeStart) : undefined);
+    parts.push(...formatSpeed(speedPrefill, decode));
     term.status(parts.join(" · "));
   };
 
@@ -306,6 +314,17 @@ async function main(): Promise<void> {
       activity("thinking");
       showThinking(text);
       streamedChars += text.length;
+      updateStatus();
+    },
+    onFirstToken: ({ inputTokens, ttftMs }) => {
+      speedPrefill = tokensPerSec(inputTokens, ttftMs);
+      decodeStart = performance.now(); // start the decode window; estimate until onStreamDone
+      speedDecode = undefined;
+      updateStatus();
+    },
+    onStreamDone: ({ outputTokens, decodeMs }) => {
+      speedDecode = tokensPerSec(outputTokens, decodeMs); // exact, replaces the estimate
+      decodeStart = undefined;
       updateStatus();
     },
   };
