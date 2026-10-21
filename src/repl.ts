@@ -16,7 +16,8 @@ import { runModelCommand, runProviderCommand } from "./model_command.ts";
 import type { ModelCommandContext } from "./model_command.ts";
 import { createTranscriptLogger } from "./log.ts";
 import { createPolicyStore, runPolicyCommand } from "./policy_command.ts";
-import { createRegistry } from "./registry.ts";
+import { createRegistry, defineTool } from "./registry.ts";
+import type { Tool } from "./registry.ts";
 import { runDefaultsCommand } from "./defaults_command.ts";
 import { DEFAULT_SETTINGS_PATH, formatSettings, loadSettings } from "./settings.ts";
 import type { Settings } from "./settings.ts";
@@ -30,7 +31,13 @@ import { createWebFetchTool } from "./tools/web_fetch.ts";
 import { loadWebPolicy } from "./tools/web_policy.ts";
 import { loadMcpConfig, serversToStart } from "./mcp/config.ts";
 import type { McpServerConfig } from "./mcp/config.ts";
-import { startMcpServers } from "./mcp/start.ts";
+import { startMcpServers, startOneServer } from "./mcp/start.ts";
+import { libraryPaths } from "./library/paths.ts";
+import { loadManifest } from "./library/manifest.ts";
+import { createLibrarySession } from "./library/session.ts";
+import type { LibrarySession } from "./library/session.ts";
+import { createLibraryTools } from "./tools/unattended/library.ts";
+import { formatDiff, formatInventory, parseLibraryCommand } from "./library_command.ts";
 import type { CompiledPolicy } from "./tools/web_policy.ts";
 import type { AgentHooks } from "./agent.ts";
 import { addUserText } from "./history.ts";
@@ -373,15 +380,58 @@ async function main(): Promise<void> {
   // Only servers this mode may start (see serversToStart); API keys never reach them.
   const starting = serversToStart(mcpServers, config.unattended);
   if (starting.length) say(dim(`starting MCP server(s): ${starting.map((s) => s.name).join(", ")}…`));
+  // Environment variables that hold a secret (an API key). No MCP server — started now, or later by
+  // the model through the library — may see them; model-started servers reuse this exact list.
+  const hiddenEnv = Object.keys(process.env).filter((k) => config.secrets.includes(process.env[k] ?? ""));
   const mcp = await startMcpServers(starting, {
-    hiddenEnv: Object.keys(process.env).filter((k) => config.secrets.includes(process.env[k] ?? "")),
+    hiddenEnv,
     ...(config.unattended ? {} : { confirm: confirmMcp }),
   });
   for (const w of mcp.warnings) transcript.log("error", { message: w });
   const systemPrompt = SYSTEM_PROMPT + mcp.systemPrompt;
+
+  // The self-extending library: tools, skills and MCP servers the user curated into a manifest, with
+  // model tools to add more and REPL commands to review and persist them. Gated entirely on unattended
+  // mode — the normal, read-only harness wires none of it (no session, no tools, no baseline loaded).
+  const libPaths = libraryPaths();
+  let librarySession: LibrarySession | undefined;
+  let libraryTools: Tool[] | undefined;
+  if (config.unattended) {
+    const manifest = await loadManifest(libPaths.manifestPath);
+    librarySession = await createLibrarySession({
+      paths: libPaths,
+      manifest,
+      toolDeps: { defineTool, workspaceRoot: config.workspaceRoot, privatePaths },
+      // The harness's own registry, so tools the library loads and servers it starts join the live
+      // tool set. applyBaseline and the library tools run only after `registry` below is created.
+      registry: { add: (t) => registry.add(t), remove: (n) => registry.remove(n), has: (n) => registry.has(n) },
+      // Same hiddenEnv as the boot-time servers: a model-started server never sees a secret.
+      startServer: (server) => startOneServer(server, { hiddenEnv }),
+    });
+    libraryTools = createLibraryTools(librarySession);
+  }
+
   const registry = createRegistry(
-    assembleTools({ workspaceRoot: config.workspaceRoot, privatePaths, webFetch, unattended: config.unattended, mcpTools: mcp.tools }),
+    assembleTools({
+      workspaceRoot: config.workspaceRoot,
+      privatePaths,
+      webFetch,
+      unattended: config.unattended,
+      mcpTools: mcp.tools,
+      ...(libraryTools ? { libraryTools } : {}),
+    }),
   );
+
+  // Load the manifest's enabled tools, start its enabled servers, record its enabled skills. Done
+  // after the registry exists (the session adds into it); reported with the MCP notes below.
+  let libraryNotes: string[] = [];
+  let libraryWarnings: string[] = [];
+  if (librarySession) {
+    const applied = await librarySession.applyBaseline();
+    libraryNotes = applied.notes;
+    libraryWarnings = applied.warnings;
+    for (const w of applied.warnings) transcript.log("error", { message: w });
+  }
   const messages: Message[] = [];
   const lastModel = new Map<Provider, string>(); // per provider, for /provider switching back
 
@@ -428,9 +478,20 @@ async function main(): Promise<void> {
   let running: AbortController | undefined; // set while a message is being answered
   let runFinishedAt = 0; // when the last run ended without an interrupt
   let quitArmed = false;
+  // On the way out, remind the user of library changes they never folded into the saved library:
+  // started/loaded/toggled this session, so lost next session unless persisted with /library.
+  const unpersistedLibraryAlert = (): string | undefined => {
+    if (!librarySession) return undefined;
+    const d = librarySession.diff();
+    if (d.added.length === 0 && d.enabledChanged.length === 0) return undefined;
+    return "⚠ This session has unpersisted library changes (see /library). They are not saved to the library and will be gone next session.";
+  };
   const quit = () => {
     endThinking();
     term.endLine();
+    librarySession?.closeAll();
+    const alert = unpersistedLibraryAlert();
+    if (alert) term.write(`${alert}\n`);
     term.write("Bye.\n");
     term.close();
     mcp.close();
@@ -463,7 +524,7 @@ async function main(): Promise<void> {
   });
 
   say(
-    `harness · ${config.provider} / ${config.model} · ${registry.definitions().length} tool(s) · ${config.stream ? "streaming" : "non-streaming"} · /exit /reset /history /policy /provider /model /thinking /turns /maxtokens /defaults /context`,
+    `harness · ${config.provider} / ${config.model} · ${registry.definitions().length} tool(s) · ${config.stream ? "streaming" : "non-streaming"} · /exit /reset /history /policy /provider /model /thinking /turns /maxtokens /defaults /context${librarySession ? " /tools /skills /mcp /library" : ""}`,
   );
   say(`transcript: ${transcript.path}`);
   say(
@@ -472,7 +533,9 @@ async function main(): Promise<void> {
       : "web policy: none (web_fetch asks before every fetch) · /policy to set one",
   );
   for (const note of mcp.notes) say(note);
+  for (const note of libraryNotes) say(note);
   for (const w of mcp.warnings) say(`⚠ ${w}`);
+  for (const w of libraryWarnings) say(`⚠ ${w}`);
   const skippedServers = mcpServers.length - starting.length;
   if (skippedServers) say(dim(`(${skippedServers} MCP server(s) in ${config.mcpConfigPath} start only with --unattended, or with "interactive": true)`));
   if (term.screen) say(dim("Type while the model works: your message reaches it at its next step. Ctrl+C stops a run."));
@@ -513,6 +576,57 @@ async function main(): Promise<void> {
     pendingInput.push(input);
     showQueued();
     updateStatus();
+  };
+
+  // Runs one /tools, /skills, /mcp or /library command against the live session. Only reached in
+  // unattended mode, where librarySession is defined. Each toggle/persist is a thin call to it.
+  const runLibraryCommand = async (input: string): Promise<void> => {
+    const session = librarySession!;
+    const action = parseLibraryCommand(input);
+    switch (action.type) {
+      case "error":
+        say(action.message);
+        return;
+      case "list":
+        say(formatInventory(session.inventory().filter((it) => it.kind === action.kind)));
+        return;
+      case "enable":
+      case "disable":
+        try {
+          say(await session.setEnabled(action.kind, action.name, action.type === "enable"));
+        } catch (err) {
+          say(`Not changed: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        return;
+      case "persist-review": {
+        const d = session.diff();
+        say(formatDiff(d));
+        if (d.added.length || d.enabledChanged.length) say("Run /library persist to fold these into the saved library.");
+        return;
+      }
+      case "persist": {
+        const d = session.diff();
+        if (d.added.length === 0 && d.enabledChanged.length === 0) {
+          say("No unpersisted session changes.");
+          return;
+        }
+        say(formatDiff(d));
+        const answer = (await term.ask("Persist these changes to the library? [y/n] ")).trim().toLowerCase();
+        if (answer !== "y" && answer !== "yes") {
+          say("Not persisted.");
+          return;
+        }
+        const selection = [...d.added, ...d.enabledChanged.map(({ kind, name }) => ({ kind, name }))];
+        try {
+          await session.persist(selection, libPaths.manifestPath);
+          transcript.log("session", { libraryPersisted: selection });
+          say(`Persisted ${selection.length} change(s) to ${libPaths.manifestPath}.`);
+        } catch (err) {
+          say(`Not persisted: ${err instanceof Error ? err.message : String(err)}`);
+        }
+        return;
+      }
+    }
   };
 
   const lines = term.lines()[Symbol.asyncIterator]();
@@ -682,6 +796,13 @@ async function main(): Promise<void> {
       term.ready();
       continue;
     }
+    // The library commands exist only when the library is wired (unattended mode); in normal mode
+    // they fall through to the unknown-command guard below, so nothing library-related is offered.
+    if (librarySession && /^\/(tools|skills|mcp|library)(?=\s|$)/.test(input)) {
+      await runLibraryCommand(input);
+      term.ready();
+      continue;
+    }
 
     // A mistyped command shouldn't go to the model as a message. Paths like /etc/hosts still do.
     const unknown = /^\/[a-z]+(?=\s|$)/i.exec(input);
@@ -789,6 +910,9 @@ async function main(): Promise<void> {
     term.ready();
   }
 
+  librarySession?.closeAll();
+  const exitAlert = unpersistedLibraryAlert();
+  if (exitAlert) say(exitAlert);
   term.close();
   mcp.close();
   await transcript.flush();
