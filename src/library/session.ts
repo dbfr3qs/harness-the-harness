@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { copyFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import type { Tool } from "../registry.ts";
@@ -16,6 +18,12 @@ export interface LibrarySessionDeps {
   startServer(s: McpServerConfig): Promise<StartedServer>;
 }
 
+export interface LibrarySnapshot {
+  tools: { name: string; file: string; hash: string; description?: string; sessionAdded: boolean; loaded: boolean }[];
+  mcps: { name: string; server: McpServerConfig; description?: string; sessionAdded: boolean; loaded: boolean }[];
+  skills: { name: string; offered: boolean; sessionAdded: boolean }[];
+}
+
 export interface LibrarySession {
   /** Absolute path of the tools directory, where authored tool files belong. */
   readonly toolsDir: string;
@@ -30,6 +38,10 @@ export interface LibrarySession {
   diff(): { added: { kind: ArtifactKind; name: string }[] };
   /** Human-only: fold the selected overlay changes into the manifest and save it. */
   persist(selection: { kind: ArtifactKind; name: string }[], manifestPath: string): Promise<void>;
+  /** Capture the working set (what is loaded/offered, plus session-added artifacts) for a later resume. */
+  snapshot(): LibrarySnapshot;
+  /** Rebuild a snapshot's working set. Best-effort: never throws; each failure becomes a warning. */
+  restore(snap: LibrarySnapshot): Promise<{ warnings: string[] }>;
   /** Close every server this session started (for quit). */
   closeAll(): void;
 }
@@ -284,6 +296,92 @@ export async function createLibrarySession(deps: LibrarySessionDeps): Promise<Li
       }
     },
 
+    snapshot() {
+      const snap: LibrarySnapshot = { tools: [], mcps: [], skills: [] };
+      for (const [name, rec] of tools) {
+        let file = rec.file;
+        if (!file && rec.manifestFile) {
+          try {
+            file = resolveToolFile(rec.manifestFile);
+          } catch {
+            file = undefined;
+          }
+        }
+        if (!file) continue;
+        snap.tools.push({ name, file, hash: hashFile(file), description: rec.description, sessionAdded: !rec.persisted, loaded: rec.enabled });
+      }
+      for (const [name, rec] of mcps) {
+        snap.mcps.push({ name, server: rec.server, description: rec.description, sessionAdded: !rec.persisted, loaded: rec.enabled });
+      }
+      for (const [name, rec] of skills) snap.skills.push({ name, offered: rec.enabled, sessionAdded: !rec.persisted });
+      return snap;
+    },
+
+    async restore(snap) {
+      const warnings: string[] = [];
+      // Dormant inserts first, so everything is known before anything loads.
+      for (const t of snap.tools) {
+        if (t.sessionAdded && !tools.has(t.name)) {
+          tools.set(t.name, { enabled: false, persisted: false, file: t.file, description: t.description });
+        }
+      }
+      for (const m of snap.mcps) {
+        if (m.sessionAdded && !mcps.has(m.name)) {
+          mcps.set(m.name, { enabled: false, persisted: false, server: m.server, toolNames: [], description: m.description });
+        }
+      }
+      for (const s of snap.skills) {
+        const rec = skills.get(s.name);
+        if (rec) rec.enabled = s.offered;
+        else warnings.push(`skill "${s.name}" from the saved session is not in the library; skipped.`);
+      }
+      for (const t of snap.tools) {
+        if (!t.loaded) continue;
+        try {
+          const rec = tools.get(t.name);
+          if (!rec) {
+            warnings.push(`tool "${t.name}" from the saved session is not in the library; skipped.`);
+            continue;
+          }
+          let current: string;
+          try {
+            current = hashFile(t.file);
+          } catch {
+            warnings.push(`tool "${t.name}": file ${t.file} is missing; not restored.`);
+            continue;
+          }
+          if (current !== t.hash) warnings.push(`tool "${t.name}": file ${t.file} changed since the session was saved (hash mismatch); loaded the current version.`);
+          const tool = await loadToolFile(t.file, toolDeps);
+          if (tool.name !== t.name) warnings.push(`tool "${t.name}": file ${t.file} now defines "${tool.name}" instead; not restored.`);
+          else {
+            if (registry.has(t.name)) registry.remove(t.name);
+            registry.add(tool);
+            rec.file = t.file;
+            rec.description = tool.description;
+            rec.enabled = true;
+            continue;
+          }
+        } catch (err) {
+          warnings.push(`tool "${t.name}" could not be restored: ${message(err)}`);
+        }
+      }
+      for (const m of snap.mcps) {
+        if (!m.loaded) continue;
+        const rec = mcps.get(m.name);
+        if (!rec) {
+          warnings.push(`MCP server "${m.name}" from the saved session is not in the library; skipped.`);
+          continue;
+        }
+        if (rec.enabled && rec.handle) continue;
+        try {
+          await startAndRegister(rec);
+        } catch (err) {
+          warnings.push(`MCP server "${m.name}" could not be restarted: ${message(err)}`);
+        }
+      }
+      return { warnings };
+    },
+
     closeAll() {
       for (const rec of mcps.values()) {
         if (rec.handle) {
@@ -324,6 +422,10 @@ export async function createLibrarySession(deps: LibrarySessionDeps): Promise<Li
   }
 
   return session;
+}
+
+function hashFile(file: string): string {
+  return createHash("sha256").update(readFileSync(file)).digest("hex");
 }
 
 function message(err: unknown): string {

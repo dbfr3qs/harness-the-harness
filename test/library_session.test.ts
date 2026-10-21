@@ -318,3 +318,104 @@ test("enabling a cataloged mcp whose start rejects surfaces the error and keeps 
   assert.ok(row);
   assert.equal(row.enabled, false);
 });
+
+// ---- snapshot / restore -------------------------------------------------------
+
+import { createHash } from "node:crypto";
+import type { LibrarySnapshot } from "../src/library/session.ts";
+const sha = (s: string) => createHash("sha256").update(s).digest("hex");
+
+async function snapFixture() {
+  const root = await tmp();
+  const toolsDir = join(root, "tools");
+  await mkdir(toolsDir, { recursive: true });
+  await writeFile(join(toolsDir, "base.ts"), goodTool("base", "base desc"));
+  const manifest: Manifest = {
+    entries: [
+      { kind: "tool", name: "base", file: "base.ts", enabled: true, description: "base desc" },
+      { kind: "skill", name: "sk", description: "a skill", enabled: true },
+      { kind: "skill", name: "sk2", description: "another", enabled: false },
+    ],
+  };
+  return { root, toolsDir, manifest };
+}
+
+test("snapshot reports session-added tool/server and a dormant baseline tool", async () => {
+  const { root, toolsDir, manifest } = await snapFixture();
+  const a = await makeSession({ root, manifest });
+  const src = goodTool("extra", "extra desc");
+  await writeFile(join(toolsDir, "extra.ts"), src);
+  await a.session.reloadTools(); // loads base + extra
+  await a.session.setEnabled("tool", "base", false);
+  await a.session.addServer(mkServer("srv"), "srv desc");
+  const snap = a.session.snapshot();
+  const extra = snap.tools.find((t) => t.name === "extra")!;
+  assert.deepEqual(extra, { name: "extra", file: join(toolsDir, "extra.ts"), hash: sha(src), description: "extra desc", sessionAdded: true, loaded: true });
+  const base = snap.tools.find((t) => t.name === "base")!;
+  assert.equal(base.sessionAdded, false);
+  assert.equal(base.loaded, false);
+  assert.deepEqual(snap.mcps, [{ name: "srv", server: mkServer("srv"), description: "srv desc", sessionAdded: true, loaded: true }]);
+  assert.deepEqual(snap.skills, [
+    { name: "sk", offered: true, sessionAdded: false },
+    { name: "sk2", offered: false, sessionAdded: false },
+  ]);
+});
+
+test("restore rebuilds a fresh session's working set from a snapshot", async () => {
+  const { root, toolsDir, manifest } = await snapFixture();
+  const a = await makeSession({ root, manifest });
+  await writeFile(join(toolsDir, "extra.ts"), goodTool("extra"));
+  await a.session.reloadTools();
+  await a.session.setEnabled("tool", "base", false);
+  await a.session.addServer(mkServer("srv"));
+  await a.session.setEnabled("skill", "sk", false);
+  await a.session.setEnabled("skill", "sk2", true);
+  const snapA = a.session.snapshot();
+  const b = await makeSession({ root, manifest });
+  const res = await b.session.restore(snapA);
+  assert.deepEqual(res.warnings, []);
+  assert.deepEqual(b.session.inventory(), a.session.inventory());
+  assert.deepEqual(b.registry.names(), a.registry.names());
+  assert.deepEqual(b.starter.started, ["srv"]);
+});
+
+test("restore is best-effort: missing file and unstartable server warn, the rest loads", async () => {
+  const { root, toolsDir, manifest } = await snapFixture();
+  await writeFile(join(toolsDir, "ok.ts"), goodTool("ok"));
+  const snap: LibrarySnapshot = {
+    tools: [
+      { name: "gone", file: join(toolsDir, "gone.ts"), hash: "x", sessionAdded: true, loaded: true },
+      { name: "ok", file: join(toolsDir, "ok.ts"), hash: sha(goodTool("ok")), sessionAdded: true, loaded: true },
+    ],
+    mcps: [{ name: "bad", server: mkServer("bad"), sessionAdded: true, loaded: true }],
+    skills: [],
+  };
+  const b = await makeSession({
+    root,
+    manifest,
+    startServer: async () => {
+      throw new Error("spawn failed");
+    },
+  });
+  const res = await b.session.restore(snap);
+  assert.equal(res.warnings.length, 2);
+  assert.ok(res.warnings.some((w) => w.includes("gone")));
+  assert.ok(res.warnings.some((w) => w.includes("bad") && w.includes("spawn failed")));
+  assert.ok(b.registry.has("ok"));
+  assert.ok(!b.registry.has("gone"));
+});
+
+test("restore warns on a content-hash mismatch but still loads the tool", async () => {
+  const { root, toolsDir, manifest } = await snapFixture();
+  await writeFile(join(toolsDir, "ok.ts"), goodTool("ok"));
+  const snap: LibrarySnapshot = {
+    tools: [{ name: "ok", file: join(toolsDir, "ok.ts"), hash: "deadbeef", sessionAdded: true, loaded: true }],
+    mcps: [],
+    skills: [],
+  };
+  const b = await makeSession({ root, manifest });
+  const res = await b.session.restore(snap);
+  assert.equal(res.warnings.length, 1);
+  assert.match(res.warnings[0], /ok.*(changed|hash)/s);
+  assert.ok(b.registry.has("ok"));
+});

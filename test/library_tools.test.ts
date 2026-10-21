@@ -41,6 +41,12 @@ function fakeSession(overrides: Partial<LibrarySession> = {}): { session: Librar
     inventory() {
       return [];
     },
+    snapshot() {
+      return { tools: [], mcps: [], skills: [] };
+    },
+    async restore() {
+      return { warnings: [] };
+    },
     diff() {
       return { added: [] };
     },
