@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPolicyStore, formatPolicy, runPolicyCommand } from "../src/policy_command.ts";
 import type { PolicyCommandContext } from "../src/policy_command.ts";
+import type { WebPolicy } from "../src/tools/web_policy.ts";
 import { createRegistry } from "../src/registry.ts";
 import { createWebFetchTool } from "../src/tools/web_fetch.ts";
 import { loadWebPolicy } from "../src/tools/web_policy.ts";
@@ -186,6 +187,23 @@ test("a store loaded from a file starts clean and reports its source", async () 
   assert.equal(store.fromFile(), true);
   assert.equal(store.dirty(), false);
   assert.match((await runPolicyCommand("", { store, approvals: new Map(), ask: async () => "" })).output, /^Web policy: .*existing\.json\n  default: deny/);
+});
+
+test("restore installs a resumed policy, dirty or clean", async () => {
+  const path = join(dir, "restore.json");
+  const sameAsFile: WebPolicy = { default: "ask", rules: [{ match: "a.test", action: "allow" }] };
+  await writeFile(path, formatPolicy(sameAsFile));
+  const store = createPolicyStore(path, await loadWebPolicy(path, true));
+
+  store.restore({ default: "deny", rules: [] }, true);
+  assert.equal(store.current().policy.default, "deny");
+  assert.equal(store.dirty(), true);
+  assert.equal(store.fromFile(), false);
+
+  store.restore(sameAsFile, false);
+  assert.equal(store.current().policy.default, "ask");
+  assert.deepEqual(store.current().policy.rules, sameAsFile.rules);
+  assert.equal(store.dirty(), false);
 });
 
 // --- web_fetch reads the live policy ---------------------------------------------------

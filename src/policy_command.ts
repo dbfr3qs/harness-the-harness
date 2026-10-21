@@ -28,6 +28,13 @@ export function createPolicyStore(path: string, loaded: CompiledPolicy | undefin
       dirty = true;
     },
 
+    /** Installs a policy from a resumed session. `unsaved` says whether it differs from the file on disk. */
+    restore(policy: WebPolicy, unsaved: boolean): void {
+      current = compileWebPolicy(withoutUnset(policy), "policy");
+      fromFile = false;
+      dirty = unsaved;
+    },
+
     /** Writes the policy atomically (temp file, then rename), so a crash can't leave half a file. */
     async save(): Promise<void> {
       const tmp = `${path}.tmp-${process.pid}`;
