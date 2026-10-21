@@ -1,8 +1,23 @@
+# dependencies
 node_modules/
-transcripts/
+
+# local secrets & config — ship the *.example.json templates instead
 .env
 harness.json
 web-policy.json
 mcp.json
-.worktrees/
+
+# runtime data (conversations, resumable sessions)
+transcripts/
 sessions/
+
+# self-extension library: custom tools, installed MCP servers, custom skills
+.harness/
+
+# worktrees, SDD scratch, and stray MCP tool dirs
+.worktrees/
+.superpowers/
+.playwright-mcp/
+
+# OS / editor cruft
+.DS_Store
