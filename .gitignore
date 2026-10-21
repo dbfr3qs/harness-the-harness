@@ -5,3 +5,4 @@ harness.json
 web-policy.json
 mcp.json
 .worktrees/
+sessions/

@@ -1,5 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { basename, dirname, isAbsolute, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { runAgent } from "./agent.ts";
 import type { AgentResult } from "./agent.ts";
 import { createAnthropicClient, fetchModelLimits, returnsThinkingOnRequest } from "./client.ts";
@@ -10,7 +12,7 @@ import type { ContextReading } from "./context_meter.ts";
 import type { ClientHooks } from "./client.ts";
 import { COMMANDS } from "./complete.ts";
 import type { CompletionState } from "./complete.ts";
-import { ConfigError, loadConfig, PROVIDERS } from "./config.ts";
+import { ConfigError, isProvider, loadConfig, PROVIDERS, providerSettings } from "./config.ts";
 import type { Config, Provider } from "./config.ts";
 import { runModelCommand, runProviderCommand } from "./model_command.ts";
 import type { ModelCommandContext } from "./model_command.ts";
@@ -29,6 +31,8 @@ import { assembleTools } from "./agent_tools.ts";
 import type { PrivatePath } from "./tools/private_paths.ts";
 import { createWebFetchTool } from "./tools/web_fetch.ts";
 import { loadWebPolicy } from "./tools/web_policy.ts";
+import { buildSessionState, createSessionStore, loadSession, resumeId, sessionPrivatePaths } from "./session_store.ts";
+import type { SessionState } from "./session_store.ts";
 import { loadMcpConfig, serversToStart } from "./mcp/config.ts";
 import type { McpServerConfig } from "./mcp/config.ts";
 import { startMcpServers, startOneServer } from "./mcp/start.ts";
@@ -55,6 +59,8 @@ function promptFilePath(): string | undefined {
   const eq = process.argv.find((a) => a.startsWith("--prompt-file="));
   return eq ? eq.slice("--prompt-file=".length) : process.env.PROMPT_FILE || undefined;
 }
+// --resume <id> (or HARNESS_RESUME) restores a saved session; may throw ConfigError for a malformed id.
+const resumeIdArg = (): string | undefined => resumeId(process.argv, process.env);
 // The full-screen layout needs a terminal on both sides; --plain and batch mode ask for a plain one.
 const useScreen = Boolean(process.stdin.isTTY && process.stdout.isTTY) && !process.argv.includes("--plain");
 // Commands that only read state, so they can run while the model is working.
@@ -141,10 +147,32 @@ async function main(): Promise<void> {
   // Saved defaults (harness.json): environment variables still win over them.
   const settingsPath = process.env.HARNESS_SETTINGS || DEFAULT_SETTINGS_PATH;
   let savedSettings: Settings;
+  let resumed: SessionState | undefined;
+  let sessionId: string = randomUUID();
+  const sessionsDir = process.env.SESSIONS_DIR || "sessions";
   try {
     savedSettings = await loadSettings(settingsPath);
     config = loadConfig(process.env, savedSettings);
     if (process.argv.includes("--unattended")) config = { ...config, unattended: true };
+    const wanted = resumeIdArg();
+    if (wanted) {
+      resumed = await loadSession(resolve(config.workspaceRoot, sessionsDir), wanted);
+      sessionId = wanted;
+      const st = resumed.settings;
+      if (!isProvider(st.provider)) throw new ConfigError(`session ${wanted} names unknown provider "${st.provider}"`);
+      // The session wins over the environment for mode and settings; the key and base URL come from the environment.
+      config = {
+        ...config,
+        ...providerSettings(process.env, st.provider, st.model, savedSettings),
+        model: st.model,
+        unattended: resumed.unattended,
+        showThinking: st.showThinking,
+        maxTurns: st.maxTurns === "unlimited" ? Infinity : st.maxTurns,
+        maxTokens: st.maxTokens,
+        ...(st.contextWindow !== undefined ? { contextWindow: st.contextWindow } : {}),
+        transcriptPath: resumed.transcriptPath || config.transcriptPath,
+      };
+    }
   } catch (err) {
     if (err instanceof ConfigError) {
       console.error(`Config error: ${err.message}`);
@@ -158,8 +186,12 @@ async function main(): Promise<void> {
   try {
     webPolicy = await loadWebPolicy(config.webPolicyPath, config.webPolicyRequired);
   } catch (err) {
-    console.error(`Config error: ${err instanceof Error ? err.message : String(err)}`);
-    process.exit(1);
+    // A resumed session carries its own policy, so a broken file on disk doesn't stop it.
+    if (!resumed) {
+      console.error(`Config error: ${err instanceof Error ? err.message : String(err)}`);
+      process.exit(1);
+    }
+    webPolicy = undefined;
   }
 
   let mcpServers: McpServerConfig[];
@@ -358,6 +390,11 @@ async function main(): Promise<void> {
   };
 
   const policyStore = createPolicyStore(config.webPolicyPath, webPolicy);
+  // Restore before createWebFetchTool: the tool description captures the policy.
+  if (resumed) {
+    const onDisk = webPolicy?.policy ?? { default: "ask", rules: [] };
+    policyStore.restore(resumed.webPolicy, !isDeepStrictEqual(JSON.parse(JSON.stringify(onDisk)), JSON.parse(JSON.stringify(resumed.webPolicy))));
+  }
   completionState = () => ({
     models: PROVIDERS[config.provider].models.map((m) => m.id),
     policyPatterns: policyStore.current().policy.rules.map((r) => r.match),
@@ -373,6 +410,7 @@ async function main(): Promise<void> {
   // keeps it that way); settings files change only through /defaults and /policy, typed by the user.
   const privatePaths: PrivatePath[] = [
     ...transcriptPrivatePaths(config),
+    ...sessionPrivatePaths(resolve(config.workspaceRoot, sessionsDir), config.workspaceRoot),
     { path: resolve(settingsPath), name: settingsPath, holds: "the harness's saved settings" },
     { path: resolve(config.webPolicyPath), name: config.webPolicyPath, holds: "the web_fetch site policy" },
     { path: resolve(config.mcpConfigPath), name: config.mcpConfigPath, holds: "the MCP server config" },
@@ -422,7 +460,36 @@ async function main(): Promise<void> {
     }),
   );
 
-  const messages: Message[] = [];
+  // Resume: rebuild the loaded working set and seed the conversation.
+  let restoreNote: string | undefined;
+  if (resumed?.library && librarySession) {
+    const { warnings } = await librarySession.restore(resumed.library);
+    for (const w of warnings) transcript.log("error", { message: `session restore: ${w}` });
+    if (warnings.length) restoreNote = `[harness note: this session was resumed; some saved library items did not restore: ${warnings.join(" ")}]`;
+  }
+  const messages: Message[] = resumed ? [...resumed.messages] : [];
+  const store = createSessionStore(resolve(config.workspaceRoot, sessionsDir), { secrets: config.secrets });
+  let saved = false;
+  const saveSession = () => {
+    // Mid-run, `messages` may end on a tool_use with no result: keep the last completed-run save.
+    if (running) return;
+    store.save(
+      buildSessionState({
+        config,
+        sessionId,
+        ...(resumed ? { createdAt: resumed.createdAt } : {}),
+        policy: policyStore.current().policy,
+        messages,
+        ...(librarySession ? { library: librarySession.snapshot() } : {}),
+      }),
+    );
+    saved = true;
+  };
+  // On exit, save only if a run completed or an earlier save happened (a zero-run session leaves no file).
+  const saveOnExit = () => {
+    if (messages.length || saved) saveSession();
+  };
+  const resumeLine = () => (saved ? `Resume this session: npm start -- --resume ${sessionId}  (saved to ${store.path(sessionId)})\n` : "");
   const lastModel = new Map<Provider, string>(); // per provider, for /provider switching back
 
   // The model's limits (context window, most it can write): known, or looked up once per model.
@@ -479,13 +546,15 @@ async function main(): Promise<void> {
   const quit = () => {
     endThinking();
     term.endLine();
+    saveOnExit();
     librarySession?.closeAll();
     const alert = unpersistedLibraryAlert();
     if (alert) term.write(`${alert}\n`);
     term.write("Bye.\n");
+    term.write(resumeLine());
     term.close();
     mcp.close();
-    void transcript.flush().finally(() => process.exit(0));
+    void Promise.all([store.flush(), transcript.flush()]).finally(() => process.exit(0));
   };
   // Ctrl+C: during a run, the first press stops the run and a second quits (in case it doesn't
   // stop promptly); at the prompt, it clears typed text, and on an empty line it quits.
@@ -518,7 +587,9 @@ async function main(): Promise<void> {
   );
   say(`transcript: ${transcript.path}`);
   say(
-    webPolicy
+    resumed
+      ? `web policy: restored from session (${policyStore.current().policy.rules.length} rule(s), default ${policyStore.current().policy.default})${policyStore.dirty() ? " · differs from the file; /policy save to keep it" : ""}`
+      : webPolicy
       ? `web policy: ${config.webPolicyPath} (${webPolicy.policy.rules.length} rule(s), default ${webPolicy.policy.default}) · /policy to view or change`
       : "web policy: none (web_fetch asks before every fetch) · /policy to set one",
   );
@@ -533,6 +604,7 @@ async function main(): Promise<void> {
         "The model can run programs and write files with this process's permissions. Use this only inside an isolated sandbox.",
     );
   }
+  if (resumed) say(`resumed session ${sessionId} (${messages.length} message(s))`);
   updateStatus();
   term.ready();
 
@@ -655,6 +727,7 @@ async function main(): Promise<void> {
       // With no history, the tool description can safely pick up the current policy.
       webFetch.refreshDescription();
       policyChangedSinceDescription = false;
+      saveSession();
       say("History cleared.");
       updateStatus();
       term.ready();
@@ -811,6 +884,11 @@ async function main(): Promise<void> {
       text += `\n\n[harness note: the user changed the web_fetch site policy. It now reads: ${summary}. This replaces the policy in the web_fetch tool description.]`;
       policyChangedSinceDescription = false;
     }
+    const restoreNoteAdded = restoreNote !== undefined;
+    if (restoreNote !== undefined) {
+      text += `\n\n${restoreNote}`;
+      restoreNote = undefined;
+    }
     const undo = addUserText(messages, text);
     const lengthAfterInput = messages.length;
     const delivered: string[] = []; // messages typed during this run that reached the model
@@ -847,6 +925,7 @@ async function main(): Promise<void> {
           undo();
           takenBack = true;
           if (noteAdded) policyChangedSinceDescription = true;
+          if (restoreNoteAdded) restoreNote = text.slice(text.lastIndexOf("[harness note: this session was resumed"));
         } else {
           delivered.length = 0; // they're in the conversation
         }
@@ -866,6 +945,7 @@ async function main(): Promise<void> {
         undo();
         takenBack = true;
         if (noteAdded) policyChangedSinceDescription = true; // resend the note with the next message
+        if (restoreNoteAdded) restoreNote = text.slice(text.lastIndexOf("[harness note: this session was resumed"));
       } else {
         delivered.length = 0;
       }
@@ -881,6 +961,7 @@ async function main(): Promise<void> {
       streamedChars = 0; // an interrupted response leaves no estimate behind
       activity(undefined);
     }
+    saveSession(); // the run is over and history is well-formed again
     // Messages typed while the run was going that it didn't get to: sent next, unless the run
     // was stopped or failed, in which case they go back in the input box to send or change.
     // A message that got no reply goes back in the box too (screen only: line mode can't edit it).
@@ -898,13 +979,15 @@ async function main(): Promise<void> {
     term.ready();
   }
 
+  saveOnExit();
   librarySession?.closeAll();
   const exitAlert = unpersistedLibraryAlert();
   if (exitAlert) say(exitAlert);
   term.close();
   mcp.close();
-  await transcript.flush();
+  await Promise.all([store.flush(), transcript.flush()]);
   console.log("Bye.");
+  if (saved) console.log(resumeLine().trimEnd());
 }
 
 function formatTokensShort(n: number): string {
