@@ -11,6 +11,10 @@ export interface ToolDeps {
   privatePaths: PrivatePath[];
   webFetch: Tool; // built in the REPL, which owns the approval prompt and the site policy
   unattended: boolean; // adds the shell and file-writing tools; only safe inside a sandbox
+  // The self-extension tools (see src/tools/unattended/library.ts). They can load code and start
+  // servers, so like run_shell/write_file they are added only in unattended mode — never in the
+  // normal, read-only harness, even if a caller passes them.
+  libraryTools?: Tool[];
   mcpTools?: Tool[]; // from the MCP servers this mode may start (see serversToStart in src/mcp/config.ts)
 }
 
@@ -32,6 +36,9 @@ export function assembleTools(deps: ToolDeps): Tool[] {
   ];
   if (deps.unattended) {
     tools.push(createRunShellTool(deps.workspaceRoot), createWriteFileTool(deps.workspaceRoot, deps.privatePaths));
+    // Only after the shell and file tools, and only when unattended: these are gated the same way,
+    // so a normal-mode caller that passes them by mistake still gets a read-only tool set.
+    tools.push(...(deps.libraryTools ?? []));
   }
   tools.push(...(deps.mcpTools ?? []));
   return tools;
