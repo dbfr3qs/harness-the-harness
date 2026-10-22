@@ -27,6 +27,8 @@ export interface Terminal {
   ask(question: string, signal?: AbortSignal): Promise<string>;
   /** A menu, where one can be shown. */
   choose?: <T>(title: string, items: MenuItem<T>[], initial: number) => Promise<T | undefined>;
+  /** A multi-toggle menu (screen only): the applied changes on Enter, [] if none, undefined if cancelled. */
+  toggle?: <T>(title: string, items: MenuItem<T>[]) => Promise<{ value: T; on: boolean }[] | undefined>;
   /** Prompts entered while idle. */
   lines(): AsyncIterable<string>;
   /** Shows the prompt again after a command (line mode). */

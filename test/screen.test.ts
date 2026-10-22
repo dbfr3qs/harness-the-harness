@@ -118,7 +118,60 @@ test("Tab completes slash commands and lists the options when it can't go furthe
   assert.equal(t.screen.inputText(), "/model deepseek-");
   t.clear();
   await t.type("\t");
-  assert.match(t.output(), /deepseek-flash {3}deepseek-v4-pro/);
+  assert.match(t.output(), /deepseek-flash/, "the ambiguous candidates open a menu in the panel");
+  assert.doesNotMatch(t.output(), /deepseek-flash {3}deepseek-v4-pro/, "not dumped into the scrollback");
+  await t.type("\x1b", 120);
+  assert.equal(t.screen.inputText(), "/model deepseek-", "cancel leaves the line alone");
+  t.screen.close();
+});
+
+test("Tab on a bare / opens a menu; Enter replaces the typed word with the candidate", async () => {
+  const t = fakeTerminal(60, 30);
+  await t.type("/");
+  t.clear();
+  await t.type("\t");
+  assert.match(t.output(), /Complete: \//);
+  assert.match(t.output(), /\/exit/);
+  assert.match(t.output(), /↑\/↓ move · enter insert · esc cancel/);
+  await t.type("\r");
+  assert.equal(t.screen.inputText(), "/exit ");
+  t.screen.close();
+});
+
+test("Tab during an ask prompt opens no menu", async () => {
+  const t = fakeTerminal(60, 30);
+  const answer = t.screen.ask("Allow? ");
+  await t.tick();
+  await t.type("/");
+  t.clear();
+  await t.type("\t");
+  assert.doesNotMatch(t.output(), /Complete:/);
+  await t.type("\r");
+  assert.equal(await answer, "/");
+  t.screen.close();
+});
+
+test("toggle() draws ●/○ rows and the toggle footer; Space+Enter resolves the change, Esc cancels", async () => {
+  const t = fakeTerminal(60, 20);
+  const items = [
+    { label: "alpha", value: "a", on: true },
+    { label: "beta", value: "b", on: false },
+  ];
+  const result = t.screen.toggle!("Tools", items);
+  await t.tick();
+  assert.match(t.output(), /● alpha/);
+  assert.match(t.output(), /○ beta/);
+  assert.match(t.output(), /↑\/↓ move · space toggle · enter apply · esc cancel/);
+  await t.type(" \r");
+  assert.deepEqual(await result, [{ value: "a", on: false }]);
+
+  const none = t.screen.toggle!("Tools", items);
+  await t.type("\r");
+  assert.deepEqual(await none, []);
+
+  const cancelled = t.screen.toggle!("Tools", items);
+  await t.type("\x1b", 120);
+  assert.equal(await cancelled, undefined);
   t.screen.close();
 });
 
