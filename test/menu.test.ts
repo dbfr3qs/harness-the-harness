@@ -98,3 +98,15 @@ test("renderMenu toggle mode draws bullets, pending state, footer and viewport m
 test("renderMenu with no items doesn't throw", () => {
   assert.deepEqual(renderMenu("Empty", [], 0, { color: false }), ["Empty"]);
 });
+
+test("selectFromMenu draws the select key-hint footer", async () => {
+  const { EventEmitter } = await import("node:events");
+  const { selectFromMenu } = await import("../src/menu.ts");
+  const input = new EventEmitter() as unknown as NodeJS.ReadStream;
+  let written = "";
+  const output = { write: (s: string) => ((written += s), true) } as unknown as NodeJS.WriteStream;
+  const p = selectFromMenu(input, output, "Pick", [{ label: "a", value: 1 }, { label: "b", value: 2 }], 0);
+  assert.ok(written.includes("↑/↓ move · enter select · esc cancel"), written);
+  input.emit("keypress", undefined, { name: "escape" });
+  assert.equal(await p, undefined);
+});

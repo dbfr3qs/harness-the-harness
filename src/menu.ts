@@ -134,7 +134,7 @@ export function selectFromMenu<T>(
     let state: MenuState = { index: first };
     let drawn = 0;
     const draw = () => {
-      const lines = renderMenu(title, items, state.index);
+      const lines = renderMenu(title, items, state.index, { footer: "↑/↓ move · enter select · esc cancel" });
       // Move back to the menu's first line and redraw it in place.
       const up = drawn > 0 ? `\x1b[${drawn}F` : "\r";
       output.write(`${up}\x1b[J${lines.join("\n")}\n`);
