@@ -1,4 +1,5 @@
 import type { ArtifactKind } from "./library/manifest.ts";
+import type { MenuItem } from "./menu.ts";
 
 // The /tools, /skills, /mcp and /library commands, parsed and formatted here so the REPL only has to
 // dispatch to a LibrarySession. Pure and unit-tested (test/library_command.test.ts); mirrors the
@@ -81,6 +82,18 @@ export function formatInventory(items: InventoryItem[]): string {
       return `  ${mark} ${it.kind.padEnd(5)} ${it.name.padEnd(width)}  ${state} · ${origin}${it.description ? ` — ${it.description}` : ""}`;
     })
     .join("\n");
+}
+
+/** Toggle-menu items for one kind: checked when loaded (tools, MCP) or offered (skills). */
+export function libraryMenuItems(items: InventoryItem[], kind: ArtifactKind): MenuItem<string>[] {
+  return items
+    .filter((it) => it.kind === kind)
+    .map((it) => {
+      const state = kind === "skill" ? (it.enabled ? "offered" : "not offered") : it.enabled ? "loaded" : "available";
+      const origin = it.persisted ? "persisted" : "session-only";
+      const hint = `${state} · ${origin}${it.description ? ` — ${it.description}` : ""}`;
+      return { label: it.name, value: it.name, on: it.enabled, hint };
+    });
 }
 
 /** Render what is new since the saved library (session load/unload is never a change). */

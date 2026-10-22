@@ -54,7 +54,7 @@ Call 1 returned 17:51:14. Now call 2.
 - **You can type at any time.** A message sent while the model is working is shown above the input box and delivered at the model's next step (with the next model call, after any tool results), so you can steer a run in progress. If the model finishes before it gets there, the message is sent as soon as the run ends. If you stop the run with Ctrl+C, or it fails, the message goes back in the input box instead, and so does a message that got no reply.
 - While the model is working, `/context` and `/history` run immediately; other commands wait until the run finishes (they stay in the input box).
 - **Editing:** ←/→, Home/End (Ctrl+A/E), Backspace/Delete, Ctrl+U/K (delete to start/end), Ctrl+W (delete word), ↑/↓ for earlier messages, Tab to complete, Ctrl+L to redraw. Pasted text keeps its line breaks (shown as `↵`) and is sent only when you press Enter; Alt+Enter adds a line break where the terminal reports it.
-- Menus (`/provider`, `/model`) and questions (`web_fetch` approval, `/policy save`) appear in the panel above the input box.
+- Menus (`/provider`, `/model`, the Tab completion menu, and the toggle menus for `/tools`, `/skills` and `/mcp` in unattended mode, see [Extending the harness at runtime](#extending-the-harness-at-runtime)) and questions (`web_fetch` approval, `/policy save`) appear in the panel above the input box. Every menu shows a key-hint line under its items, so the keys stay visible.
 - Scrollback keeps the whole conversation: the panel is redrawn below the output rather than pinned with a terminal scroll region, which many terminals don't keep in scrollback. On a resize the harness asks the terminal where the cursor is and redraws the panel on the bottom row; this is best-effort, and Ctrl+L redraws if anything looks off.
 
 The screen needs a terminal for both input and output. With piped input or output, or `--plain`, the harness uses the line-by-line REPL: the prompt follows the output, messages typed during a run wait until it finishes, and dots show while it's waiting for the model.
@@ -75,7 +75,7 @@ The screen needs a terminal for both input and output. With piped input or outpu
 | `/defaults` | Show what the harness starts with; `/defaults save` keeps this session's provider, models, thinking, turns and max tokens, `/defaults clear` removes them (see [Saved defaults](#saved-defaults)) |
 | `/thinking` | Show or hide the model's thinking: `/thinking on`, `/thinking off` (see [Seeing the model's thinking](#seeing-the-models-thinking)) |
 
-Press Tab to complete commands and their arguments (provider names, the current provider's models, `/policy` subcommands and existing rule patterns); press it twice to list the options. A line that starts with an unknown `/word` is reported as an unknown command rather than sent to the model; paths such as `/etc/hosts` still go through.
+Press Tab to complete commands and their arguments (provider names, the current provider's models, `/policy` subcommands and existing rule patterns). In the screen, if several commands match and they share no longer prefix, Tab opens a completion menu in the panel above the input box instead of listing them in the scrollback: move with ↑/↓, press Enter to insert the chosen command into the input box, or Esc to cancel. A single match, or a longer shared prefix, completes inline with no menu. The menu doesn't open while a run is in progress. In the line REPL, press Tab twice to list the options. A line that starts with an unknown `/word` is reported as an unknown command rather than sent to the model; paths such as `/etc/hosts` still go through.
 
 Responses stream by default: text appears as the model writes it, and an animated row of dots (one to five and back) shows while it's waiting, in the status bar (or, in the line REPL, on its own line). Set `STREAM=0` to use plain non-streaming requests.
 
@@ -375,6 +375,8 @@ Changing the tool set rewrites the tool definitions, which resets the prompt cac
 ```
 
 The lists mark each item `persisted` or `session-only`. `/library persist` is the only path that writes the manifest: it shows the new installs, asks once, and saves them all. Loading or unloading an item for the session is not saved by it. The commands exist only in unattended mode; in normal mode they are unknown commands. Persisting a tool copies its file into the library's `tools/` directory.
+
+In the screen, `/tools`, `/skills` and `/mcp` with no argument open a **toggle menu** of the installed items instead of printing the list. Move with ↑/↓, press **Space** to mark an item to enable or disable it, **Enter** to apply the marked changes, or **Esc** to discard them; nothing changes until you press Enter. Without a screen (piped input or `--plain`), the same commands print the list as above.
 
 **The tool-file contract.** A native tool is a `.ts` file directly in the library's `tools/` directory whose default export is a factory `(deps) => Tool`. It imports **no harness code**: everything it needs arrives in `deps`, which has `defineTool`, `workspaceRoot` (the workspace path) and `privatePaths` (paths the file tools must not touch).
 

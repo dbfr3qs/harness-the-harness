@@ -1,7 +1,7 @@
 import { emitKeypressEvents } from "node:readline";
 import { PassThrough } from "node:stream";
 import { completeSlashCommand } from "./complete.ts";
-import { menuKey, renderMenu } from "./menu.ts";
+import { appliedToggles, menuKey, renderMenu } from "./menu.ts";
 import type { Key, MenuItem, MenuState } from "./menu.ts";
 import { SPINNER_FRAMES } from "./spinner.ts";
 import type { Terminal, TerminalOptions } from "./terminal.ts";
@@ -63,7 +63,7 @@ export function fit(s: string, width: number): string {
 type Mode =
   | { kind: "input" }
   | { kind: "ask"; question: string; done: (answer: string) => void; cancellable: boolean }
-  | { kind: "menu"; title: string; items: MenuItem<unknown>[]; state: MenuState; done: (state: MenuState) => void };
+  | { kind: "menu"; title: string; items: MenuItem<unknown>[]; state: MenuState; toggle?: boolean; footer: string; done: (state: MenuState) => void };
 
 const MAX_INPUT_ROWS = 8;
 const PROMPT = "> ";
@@ -162,7 +162,16 @@ export function createScreen(opts: ScreenOptions): Terminal {
     const width = cols() - 1; // never write the last column, so nothing wraps
     const lines: string[] = [];
     if (mode.kind === "menu") {
-      for (const line of renderMenu(mode.title, mode.items, mode.state.index)) lines.push(fit(line, width));
+      // Item rows get what the screen has left after the title, footer, up to two "more" markers,
+      // notes, divider and status bar.
+      const maxRows = Math.max(1, rows() - 6 - noteLines.length);
+      const menuLines = renderMenu(mode.title, mode.items, mode.state.index, {
+        toggle: mode.toggle,
+        toggled: mode.state.toggled,
+        footer: mode.footer,
+        maxRows,
+      });
+      for (const line of menuLines) lines.push(fit(line, width));
     }
     if (mode.kind === "ask") {
       for (const line of wrapPlain(mode.question.replace(/\s+$/, ""), width)) lines.push(line);
@@ -295,8 +304,21 @@ export function createScreen(opts: ScreenOptions): Terminal {
     if (common.length > word.length) {
       insert(common.slice(word.length));
       draw();
-    } else {
-      draw(`${dimText(hits.map((h) => h.trim()).join("   "))}\n`);
+    } else if (mode.kind === "input" && !terminal.onBusyInput) {
+      // onBusyInput is set for the whole of a turn (activityLabel has gaps between steps).
+      const items = hits.map((h) => ({ label: h.trim(), value: h }));
+      setMode({
+        kind: "menu",
+        title: `Complete: ${line}`,
+        footer: "↑/↓ move · enter insert · esc cancel",
+        items: items as MenuItem<unknown>[],
+        state: { index: 0 },
+        done: (state) => {
+          mode = { kind: "input" };
+          if (state.done === "select") insert(hits[state.index]!.slice(word.length));
+          draw();
+        },
+      });
     }
   }
 
@@ -339,7 +361,7 @@ export function createScreen(opts: ScreenOptions): Terminal {
     }
 
     if (mode.kind === "menu") {
-      const next = menuKey(mode.items, mode.state, k);
+      const next = menuKey(mode.items, mode.state, k, { toggle: mode.toggle });
       if (next.done) return mode.done(next);
       mode.state = next;
       draw();
@@ -561,10 +583,29 @@ export function createScreen(opts: ScreenOptions): Terminal {
           title,
           items: items as MenuItem<unknown>[],
           state: { index: first },
+          footer: "↑/↓ move · enter select · esc cancel",
           done: (state) => {
             mode = { kind: "input" };
             draw();
             resolve(state.done === "select" ? items[state.index]!.value : undefined);
+          },
+        });
+      });
+    },
+    toggle<T>(title: string, items: MenuItem<T>[]) {
+      if (items.length === 0) return Promise.resolve([]);
+      return new Promise<{ value: T; on: boolean }[] | undefined>((resolve) => {
+        setMode({
+          kind: "menu",
+          title,
+          items: items as MenuItem<unknown>[],
+          state: { index: Math.max(0, items.findIndex((i) => !i.disabled)) },
+          toggle: true,
+          footer: "↑/↓ move · space toggle · enter apply · esc cancel",
+          done: (state) => {
+            mode = { kind: "input" };
+            draw();
+            resolve(state.done === "select" ? appliedToggles(items, state) : undefined);
           },
         });
       });

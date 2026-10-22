@@ -42,7 +42,7 @@ import { loadManifest } from "./library/manifest.ts";
 import { createLibrarySession } from "./library/session.ts";
 import type { LibrarySession } from "./library/session.ts";
 import { createLibraryTools } from "./tools/unattended/library.ts";
-import { formatDiff, formatInventory, parseLibraryCommand } from "./library_command.ts";
+import { formatDiff, formatInventory, libraryMenuItems, parseLibraryCommand } from "./library_command.ts";
 import type { CompiledPolicy } from "./tools/web_policy.ts";
 import type { AgentHooks } from "./agent.ts";
 import { addUserText } from "./history.ts";
@@ -666,9 +666,39 @@ async function main(): Promise<void> {
       case "error":
         say(action.message);
         return;
-      case "list":
-        say(formatInventory(session.inventory().filter((it) => it.kind === action.kind)));
+      case "list": {
+        if (!(term.screen && term.toggle)) {
+          say(formatInventory(session.inventory().filter((it) => it.kind === action.kind)));
+          return;
+        }
+        const items = libraryMenuItems(session.inventory(), action.kind);
+        if (items.length === 0) {
+          say("Nothing in the library yet.");
+          return;
+        }
+        const changes = await term.toggle(`${action.kind === "mcp" ? "MCP servers" : `${action.kind}s`} (space toggles, enter applies)`, items);
+        if (changes === undefined) return;
+        if (changes.length === 0) {
+          say("No changes.");
+          return;
+        }
+        const lines: string[] = [];
+        activity("applying library changes");
+        try {
+          for (const { value, on } of changes) {
+            try {
+              lines.push(await session.setEnabled(action.kind, value, on));
+            } catch (err) {
+              lines.push(`Not changed: ${value}: ${err instanceof Error ? err.message : String(err)}`);
+            }
+          }
+        } finally {
+          activity(undefined);
+        }
+        say(lines.join("\n"));
+        updateStatus();
         return;
+      }
       case "enable":
       case "disable":
         try {
