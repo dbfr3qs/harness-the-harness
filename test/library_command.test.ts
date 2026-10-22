@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { formatDiff, formatInventory, parseLibraryCommand } from "../src/library_command.ts";
+import { formatDiff, formatInventory, libraryMenuItems, parseLibraryCommand } from "../src/library_command.ts";
 import type { InventoryItem, LibraryDiff } from "../src/library_command.ts";
 
 test("/tools with no argument parses to a list of tools", () => {
@@ -96,4 +96,21 @@ test("formatDiff lists added items and mentions no enabled/disabled change", () 
 
 test("formatDiff reports an empty diff plainly", () => {
   assert.match(formatDiff({ added: [] }), /[Nn]o unpersisted/);
+});
+
+test("libraryMenuItems filters to the kind, maps enabled to on, and builds the hint", () => {
+  const inv: InventoryItem[] = [
+    { kind: "tool", name: "grep_tool", enabled: true, persisted: true },
+    { kind: "mcp", name: "srv", enabled: false, persisted: false },
+    { kind: "skill", name: "writing", enabled: true, persisted: true },
+    { kind: "tool", name: "other", enabled: false, persisted: true },
+  ];
+  const tools = libraryMenuItems(inv, "tool");
+  assert.deepEqual(tools.map((i) => [i.label, i.value, i.on]), [["grep_tool", "grep_tool", true], ["other", "other", false]]);
+  assert.match(tools[0]!.hint!, /loaded/);
+  assert.match(tools[0]!.hint!, /persisted/);
+  const mcp = libraryMenuItems(inv, "mcp");
+  assert.match(mcp[0]!.hint!, /available/);
+  assert.match(mcp[0]!.hint!, /session-only/);
+  assert.match(libraryMenuItems(inv, "skill")[0]!.hint!, /offered/);
 });
