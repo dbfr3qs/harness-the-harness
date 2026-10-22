@@ -304,7 +304,8 @@ export function createScreen(opts: ScreenOptions): Terminal {
     if (common.length > word.length) {
       insert(common.slice(word.length));
       draw();
-    } else if (mode.kind === "input") {
+    } else if (mode.kind === "input" && !terminal.onBusyInput) {
+      // onBusyInput is set for the whole of a turn (activityLabel has gaps between steps).
       const items = hits.map((h) => ({ label: h.trim(), value: h }));
       setMode({
         kind: "menu",

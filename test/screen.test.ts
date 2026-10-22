@@ -151,6 +151,18 @@ test("Tab during an ask prompt opens no menu", async () => {
   t.screen.close();
 });
 
+test("Tab while the agent is busy opens no menu and leaves the line alone", async () => {
+  const t = fakeTerminal(60, 30);
+  t.screen.onBusyInput = () => {};
+  await t.type("/");
+  t.clear();
+  await t.type("\t");
+  assert.doesNotMatch(t.output(), /Complete:/);
+  assert.equal(t.screen.inputText(), "/");
+  t.screen.onBusyInput = undefined;
+  t.screen.close();
+});
+
 test("toggle() draws ●/○ rows and the toggle footer; Space+Enter resolves the change, Esc cancels", async () => {
   const t = fakeTerminal(60, 20);
   const items = [
