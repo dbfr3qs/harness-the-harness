@@ -41,6 +41,7 @@ import type { McpServerConfig } from "./mcp/config.ts";
 import { startMcpServers, startOneServer } from "./mcp/start.ts";
 import { libraryPaths } from "./library/paths.ts";
 import { loadManifest } from "./library/manifest.ts";
+import { createSplash } from "./splash.ts";
 import { createLibrarySession } from "./library/session.ts";
 import type { LibrarySession } from "./library/session.ts";
 import { createLibraryTools } from "./tools/unattended/library.ts";
@@ -450,22 +451,31 @@ async function main(): Promise<void> {
     { path: resolve(config.webPolicyPath), name: config.webPolicyPath, holds: "the web_fetch site policy" },
     { path: resolve(config.mcpConfigPath), name: config.mcpConfigPath, holds: "the MCP server config" },
   ];
+  // A startup splash (interactive only): the wordmark, a spinner, and a live checklist of the boot
+  // phases while MCP servers, the library and the registry come up. Config and the web policy are
+  // already loaded by now, so they start ticked.
+  const splash = createSplash(term, ["config", "web policy", "MCP servers", "library", "registry"]);
+  splash.set("config", "done");
+  splash.set("web policy", "done");
+
   // Only servers this mode may start (see serversToStart); API keys never reach them.
   const starting = serversToStart(mcpServers, config.unattended);
-  if (starting.length) say(dim(`starting MCP server(s): ${starting.map((s) => s.name).join(", ")}…`));
   // Environment variables that hold a secret (an API key). No MCP server — started now, or later by
   // the model through the library — may see them; model-started servers reuse this exact list.
   const hiddenEnv = Object.keys(process.env).filter((k) => config.secrets.includes(process.env[k] ?? ""));
+  splash.set("MCP servers", "active");
   const mcp = await startMcpServers(starting, {
     hiddenEnv,
     ...(config.unattended ? {} : { confirm: confirmMcp }),
   });
+  splash.set("MCP servers", mcp.warnings.length ? "failed" : "done");
   for (const w of mcp.warnings) transcript.log("error", { message: w });
   const systemPrompt = SYSTEM_PROMPT + mcp.systemPrompt;
 
   // The self-extending library: tools, skills and MCP servers the user curated into a manifest, with
   // model tools to add more and REPL commands to review and persist them. Gated entirely on unattended
   // mode — the normal, read-only harness wires none of it (no session, no tools, no baseline loaded).
+  splash.set("library", "active");
   const libPaths = libraryPaths();
   let librarySession: LibrarySession | undefined;
   let libraryTools: Tool[] | undefined;
@@ -483,7 +493,9 @@ async function main(): Promise<void> {
     });
     libraryTools = createLibraryTools(librarySession);
   }
+  splash.set("library", "done");
 
+  splash.set("registry", "active");
   const registry = createRegistry(
     assembleTools({
       workspaceRoot: config.workspaceRoot,
@@ -494,6 +506,7 @@ async function main(): Promise<void> {
       ...(libraryTools ? { libraryTools } : {}),
     }),
   );
+  splash.set("registry", "done");
 
   // Resume: rebuild the loaded working set and seed the conversation.
   let restoreNote: string | undefined;
@@ -617,6 +630,7 @@ async function main(): Promise<void> {
     quit();
   });
 
+  await splash.finish();
   say(
     `harness · ${config.provider} / ${config.model} · ${registry.definitions().length} tool(s) · ${config.stream ? "streaming" : "non-streaming"} · /exit /reset /history /policy /provider /model /thinking /turns /maxtokens /defaults /context${librarySession ? " /tools /skills /mcp /library" : ""}`,
   );
