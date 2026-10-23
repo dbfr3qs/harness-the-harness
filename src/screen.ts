@@ -10,7 +10,9 @@ import { dimText } from "./terminal.ts";
 // --- text measurement ------------------------------------------------------------------
 
 const segmenter = new Intl.Segmenter();
-const ANSI = /\x1b\[[0-9;?]*[ -/]*[@-~]/g;
+const ESC_SRC = "\\x1b\\[[0-9;?]*[ -/]*[@-~]|\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)"; // CSI | OSC (BEL or ST terminated)
+const ANSI = new RegExp(ESC_SRC, "g");
+const ANSI_SPLIT = new RegExp(`(${ESC_SRC})`);
 
 /** User-perceived characters, so an emoji or an accented letter moves the cursor once. */
 export function graphemes(s: string): string[] {
@@ -43,8 +45,8 @@ export function fit(s: string, width: number): string {
   if (textWidth(s) <= width) return s;
   let out = "";
   let w = 0;
-  for (const part of s.split(/(\x1b\[[0-9;?]*[ -/]*[@-~])/)) {
-    if (part.startsWith("\x1b[")) {
+  for (const part of s.split(ANSI_SPLIT)) {
+    if (part.startsWith("\x1b")) {
       out += part;
       continue;
     }
@@ -125,8 +127,8 @@ export function createScreen(opts: ScreenOptions): Terminal {
       advanced++;
     };
     const width = cols();
-    for (const part of text.split(/(\x1b\[[0-9;?]*[ -/]*[@-~])/)) {
-      if (part.startsWith("\x1b[")) {
+    for (const part of text.split(ANSI_SPLIT)) {
+      if (part.startsWith("\x1b")) {
         s += part;
         continue;
       }

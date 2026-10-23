@@ -270,3 +270,7 @@ test("the screen terminal is interactive", () => {
   const t = fakeTerminal();
   assert.equal(t.screen.interactive, true);
 });
+
+test("textWidth ignores OSC 8 hyperlink sequences", () => {
+  assert.equal(textWidth("\x1b]8;;http://x\x1b\\docs\x1b]8;;\x1b\\"), 4);
+});

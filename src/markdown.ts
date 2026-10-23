@@ -58,7 +58,7 @@ function resolve(s: string, i: number, final: boolean, prev: string | undefined)
     const text = s.slice(i + 1, rb);
     const url = s.slice(rb + 2, rp);
     if (text === "") return "literal";
-    return { out: styled(LINK, text) + " " + DIM + "(" + url + ")" + RESET, len: rp + 1 - i };
+    return { out: "\x1b]8;;" + url + "\x1b\\" + styled(LINK, text) + "\x1b]8;;\x1b\\ " + DIM + "(" + url + ")" + RESET, len: rp + 1 - i };
   }
 
   // "*" or "_"
@@ -209,12 +209,14 @@ function createDimmer(): { map(s: string): string; end(): string } {
   return {
     map(input) {
       let out = "";
-      for (const part of input.split(/(\x1b\[[0-9;]*m|\n)/)) {
+      for (const part of input.split(/(\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;]*m|\n)/)) {
         if (part === "") continue;
         if (part === "\n") {
           if (open) out += RESET;
           open = false;
           out += part;
+        } else if (part.startsWith("\x1b]")) {
+          out += part; // OSC (hyperlink): not an SGR and not printable; pass through untouched
         } else if (part.startsWith("\x1b[")) {
           continue;
         } else {

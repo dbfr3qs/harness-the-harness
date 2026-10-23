@@ -57,7 +57,7 @@ test("a standalone asterisk stays literal", () => {
   assert.equal(render("2 * 3 = 6"), "2 * 3 = 6");
 });
 test("a link shows styled text then a dim URL", () => {
-  assert.equal(render("see [docs](http://x)"), "see \x1b[4mdocs\x1b[0m \x1b[2m(http://x)\x1b[0m");
+  assert.equal(render("see [docs](http://x)"), "see \x1b]8;;http://x\x1b\\\x1b[4mdocs\x1b[0m\x1b]8;;\x1b\\ \x1b[2m(http://x)\x1b[0m");
 });
 test("unterminated emphasis flushes literally", () => {
   assert.equal(render("**oops"), "**oops");
@@ -274,4 +274,19 @@ test("dim mode dims mixed blocks and keeps separators clean", () => {
   assert.ok(out.endsWith("\x1b[0m"));
   assert.ok(!/\x1b\[2m\n/.test(out));
   assert.ok(out.includes("\x1b[2mpara\x1b[0m") && out.includes("item"));
+});
+
+test("a link is wrapped in an OSC 8 hyperlink and keeps the dim url", () => {
+  const out = render("[docs](http://x)");
+  assert.ok(out.includes("\x1b]8;;http://x\x1b\\")); // OSC 8 open
+  assert.ok(out.includes("\x1b]8;;\x1b\\"));          // OSC 8 close
+  assert.match(out, /\x1b\[4mdocs\x1b\[0m/);          // styled text
+  assert.match(out, /\x1b\[2m\(http:\/\/x\)\x1b\[0m/); // dim url kept
+});
+
+test("dim mode passes OSC 8 through and still dims the link text", () => {
+  const out = renderDim("[docs](http://x)");
+  assert.ok(out.includes("\x1b]8;;http://x\x1b\\"));
+  assert.ok(out.includes("\x1b]8;;\x1b\\"));
+  assert.match(out, /\x1b\]8;;http:\/\/x\x1b\\\x1b\[2mdocs/);
 });
