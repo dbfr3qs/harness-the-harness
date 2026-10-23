@@ -15,6 +15,8 @@ export type MarkdownStream = {
   flush(): string;
 };
 
+const BOLD_ITALIC = "\x1b[1;3m";
+
 type Step = { out: string; len: number } | "literal" | "more";
 
 const isSpace = (c: string | undefined): boolean => c === undefined || /\s/.test(c);
@@ -61,12 +63,21 @@ function resolve(s: string, i: number, final: boolean, prev: string | undefined)
   if (i + 1 >= s.length && !final) return "more";
   if (c === "_" && isWord(prev)) return "literal";
   const double = s[i + 1] === c;
-  const m = double ? c + c : c;
-  const start = i + m.length;
+  if (double && i + 2 >= s.length && !final) return "more";
+  const triple = double && s[i + 2] === c;
+  const start = i + (triple ? 3 : double ? 2 : 1);
   if (start >= s.length && !final) return "more";
   if (isSpace(s[start]) || s[start] === c) return "literal";
   for (let j = start; j < end; j++) {
     if (s[j] !== c || isSpace(s[j - 1])) continue;
+    if (triple) {
+      if (s[j + 1] === undefined || (s[j + 1] === c && s[j + 2] === undefined)) {
+        if (!final) return "more";
+        continue;
+      }
+      if (s[j + 1] !== c || s[j + 2] !== c) continue;
+      return { out: styled(BOLD_ITALIC, s.slice(start, j)), len: j + 3 - i };
+    }
     if (double) {
       if (s[j + 1] !== c) {
         if (j + 1 >= s.length && !final) return "more";

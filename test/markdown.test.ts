@@ -197,3 +197,19 @@ test("flush resets the sink for the next run", () => {
   sink.text("`b`"); sink.flush();      // fresh state
   assert.equal(out, "\x1b[33mb\x1b[0m");
 });
+test("triple markers collapse to bold+italic with no stray markers", () => {
+  assert.equal(render("***x***"), "\x1b[1;3mx\x1b[0m");
+  assert.equal(render("___x___"), "\x1b[1;3mx\x1b[0m");
+  assert.equal(render("a ***b `c` d*** e"), "a \x1b[1;3mb \x1b[33mc\x1b[0m\x1b[1;3m d\x1b[0m e");
+  assert.equal(render("**b** *i*"), "\x1b[1mb\x1b[0m \x1b[3mi\x1b[0m");
+});
+test("unterminated triple marker is literal, never stalls or leaks", () => {
+  assert.equal(render("***oops"), "***oops");
+  assert.equal(render("***oops\nnext"), "***oops\nnext");
+  const s = createMarkdownStream();
+  assert.equal(s.write("***a\nb"), "***a\nb");
+});
+test("chunk-split invariance over triple markers", () => {
+  assertChunkInvariant("a ***b*** c");
+  assertChunkInvariant("a ___b___ c ***d\ne*** f");
+});
