@@ -19,7 +19,11 @@ export interface ToolResultOptions {
 export function formatToolResult(content: string, opts: ToolResultOptions = {}): string[] {
   const maxLines = opts.maxLines ?? 8;
   const maxChars = opts.maxChars ?? 800;
-  let text = content.replace(/\r\n?/g, "\n").replace(/\s+$/, "");
+  // Tool output is untrusted: drop ANSI/OSC escapes and control bytes (keeping \n and \t) before bounding.
+  content = content
+    .replace(/\r\n?/g, "\n")
+    .replace(/\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|[\x00-\x08\x0b-\x1f\x7f]/g, "");
+  let text = content.replace(/\s+$/, "");
   if (!text.trim()) return [];
   if (opts.error) text = `✗ ${text.replace(/^Error:\s*/, "")}`;
 
@@ -33,7 +37,7 @@ export function formatToolResult(content: string, opts: ToolResultOptions = {}):
   const out = shown.map((l) => dimText(`    ${l}`));
   if (lines.length > maxLines) {
     // Line cap hit: count what remains of the full content's lines.
-    const total = content.replace(/\r\n?/g, "\n").replace(/\s+$/, "").split("\n").length;
+    const total = content.replace(/\s+$/, "").split("\n").length;
     out.push(dimText(`    … +${total - maxLines} more lines`));
   } else if (charTruncated) {
     out.push(dimText("    … (truncated)"));

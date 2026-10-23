@@ -26,3 +26,21 @@ test("error result is marked", () => {
 test("empty content yields no preview", () => {
   assert.deepEqual(formatToolResult("   "), []);
 });
+test("escape sequences and control bytes are stripped from the preview", () => {
+  const out = formatToolResult("\x1b[2Jhi\x07\n\x1b]0;title\x07there\x00\x08!");
+  const plain = out.map(strip);
+  assert.equal(plain[0], "    hi");
+  assert.equal(plain[1], "    there!");
+  assert.ok(!/[\x00-\x08\x0b-\x1a\x1c-\x1f\x7f]/.test(plain.join("\n")));
+  assert.ok(!plain.join("\n").includes("\x1b"));
+});
+test("both caps: bounded content and correct marker", () => {
+  const big = ("y".repeat(5000) + "\n").repeat(3);
+  const out = formatToolResult(big, { maxLines: 3, maxChars: 800 });
+  const plain = out.map(strip);
+  const content = plain.filter((l) => !l.includes("…")).join("\n");
+  assert.ok(content.length <= 800 + 4 * 3);
+  assert.match(plain.at(-1)!, /truncated/);
+  const more = formatToolResult(("z\n").repeat(20), { maxLines: 3, maxChars: 800 }).map(strip);
+  assert.equal(more.at(-1), "    … +17 more lines");
+});
