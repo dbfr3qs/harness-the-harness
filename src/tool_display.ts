@@ -22,14 +22,15 @@ export function formatToolResult(content: string, opts: ToolResultOptions = {}):
   // Tool output is untrusted: drop ANSI/OSC escapes and control bytes (keeping \n and \t) before bounding.
   content = content
     .replace(/\r\n?/g, "\n")
-    .replace(/\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|[\x00-\x08\x0b-\x1f\x7f]/g, "");
+    .replace(/\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07|[\x00-\x08\x0b-\x1f\x7f-\x9f]/g, "");
   let text = content.replace(/\s+$/, "");
-  if (!text.trim()) return [];
+  if (!text.trim()) return opts.error ? [dimText("    ✗ (no output)")] : [];
   if (opts.error) text = `✗ ${text.replace(/^Error:\s*/, "")}`;
 
   let charTruncated = false;
   if (text.length > maxChars) {
     text = text.slice(0, maxChars);
+    if (/[\uD800-\uDBFF]$/.test(text)) text = text.slice(0, -1);
     charTruncated = true;
   }
   const lines = text.split("\n");

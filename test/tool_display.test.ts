@@ -44,3 +44,21 @@ test("both caps: bounded content and correct marker", () => {
   const more = formatToolResult(("z\n").repeat(20), { maxLines: 3, maxChars: 800 }).map(strip);
   assert.equal(more.at(-1), "    … +17 more lines");
 });
+
+test("empty error result still shows the failure marker", () => {
+  const out = formatToolResult("   ", { error: true });
+  assert.equal(out.length, 1);
+  assert.ok(/^\s*✗/.test(out[0]!.replace(/\x1b\[[0-9;]*m/g, "")));
+});
+
+test("C1 control bytes are stripped", () => {
+  const out = formatToolResult("a\x9b31mb").join("");
+  assert.ok(!out.includes("\x9b"));
+});
+
+test("char cap does not split a surrogate pair", () => {
+  const cap = 20;
+  const out = formatToolResult("x".repeat(cap - 1) + "😀rest", { maxChars: cap });
+  const line = out[0]!.replace(/\x1b\[[0-9;]*m/g, "");
+  assert.ok(!/[\uD800-\uDBFF]$/.test(line));
+});
