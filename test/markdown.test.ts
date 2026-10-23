@@ -80,3 +80,37 @@ test("snake_case underscores stay literal; inline code nests in bold", () => {
   assert.equal(render("**a `c` b**"), "\x1b[1ma \x1b[33mc\x1b[0m\x1b[1m b\x1b[0m");
   assertChunkInvariant("snake_case **a `c` b** _x_ [**t**](u)");
 });
+
+test("ATX heading is cyan-bold with markers stripped", () => {
+  assert.equal(render("# Hello"), "\x1b[1;36mHello\x1b[0m");
+  assert.equal(render("## Two ##"), "\x1b[1;36mTwo\x1b[0m");
+});
+test("a heading gets one blank line before and after", () => {
+  assert.equal(render("intro\n# H\nbody"), "intro\n\n\x1b[1;36mH\x1b[0m\n\nbody");
+});
+test("unordered list items get a bullet; inline still applies", () => {
+  assert.equal(render("- one\n- a **b**"), "• one\n• a \x1b[1mb\x1b[0m");
+});
+test("ordered list keeps its number", () => {
+  assert.equal(render("1. first\n2. second"), "1. first\n2. second");
+});
+test("blockquote gets a dim bar", () => {
+  assert.equal(render("> quoted"), "\x1b[2m│ \x1b[0mquoted");
+});
+test("thematic break becomes a dim rule", () => {
+  assert.equal(render("a\n---\nb"), "a\n\n\x1b[2m" + "─".repeat(32) + "\x1b[0m\n\nb");
+});
+test("runs of blank lines collapse to one", () => {
+  assert.equal(render("a\n\n\n\nb"), "a\n\nb");
+});
+test("chunk-split invariance over mixed block content", () => {
+  assertChunkInvariant("# Title\n\nsome *text*\n\n- a\n- b\n\n> q\n\n---\n\nend");
+});
+test("block-marker lookalikes stay literal and chunk-invariant", () => {
+  for (const md of ["#hash", "####### seven", "-x", "--", "**bold** text", "1.x", "12", "+ p\n  - n", "***b***", "> "]) {
+    assertChunkInvariant(md);
+  }
+  assert.equal(render("#hash"), "#hash");
+  assert.equal(render("-x"), "-x");
+  assert.equal(render("+ p\n  - n"), "• p\n  • n");
+});

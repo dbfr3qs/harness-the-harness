@@ -119,23 +119,157 @@ export function renderInline(text: string): string {
   return run(text, true, undefined).out;
 }
 
-export function createMarkdownStream(): MarkdownStream {
-  // Unprocessed input. Always either empty or starting at an unresolved marker.
-  let held = "";
-  let prev: string | undefined;
+type Kind = "text" | "heading" | "rule";
+type Start =
+  | "more"
+  | "blank"
+  | { mode: "line" }
+  | { mode: "inline"; prefix: string; rest: string; kind: Kind };
 
-  return {
-    write(delta: string): string {
-      const r = run(held + delta, false, prev);
-      held = r.rest;
-      prev = r.prev;
-      return r.out;
-    },
-    flush(): string {
-      const r = run(held, true, prev);
+const RULE = /^(?:-{3,}|\*{3,}|_{3,})$/;
+const RULE_TEXT = DIM + "─".repeat(32) + RESET;
+
+/**
+ * Classify a line from the characters seen so far. "more" means the start marker is
+ * still ambiguous; `complete` (newline seen or final) forces a decision.
+ */
+function classify(buf: string, complete: boolean): Start {
+  const indent = /^[ \t]*/.exec(buf)![0];
+  const t = buf.slice(indent.length);
+  const pad = " ".repeat(Math.floor(indent.length / 2) * 2);
+  const para: Start = { mode: "inline", prefix: "", rest: buf, kind: "text" };
+  const undecided: Start = complete ? para : "more";
+  if (t === "") return complete ? "blank" : "more";
+  const c = t[0];
+  if (c === "#") {
+    const m = /^#+/.exec(t)![0];
+    if (m.length > 6) return para;
+    if (t.length === m.length) return undecided;
+    return t[m.length] === " " ? { mode: "line" } : para;
+  }
+  if (c === ">") {
+    if (t.length === 1) return undecided;
+    return t[1] === " " ? { mode: "inline", prefix: DIM + "│ " + RESET, rest: t.slice(2), kind: "text" } : para;
+  }
+  if (c === "-" || c === "*" || c === "_" || c === "+") {
+    let r = 1;
+    while (t[r] === c) r++;
+    if (c !== "+" && r >= 3) return { mode: "line" };
+    if (t.length === r) return undecided;
+    if (r === 1 && c !== "_" && t[1] === " ") return { mode: "inline", prefix: pad + "• ", rest: t.slice(2), kind: "text" };
+    return para;
+  }
+  if (c >= "0" && c <= "9") {
+    const d = /^\d+/.exec(t)![0];
+    if (t.length === d.length) return undecided;
+    if (t[d.length] !== ".") return para;
+    if (t.length === d.length + 1) return undecided;
+    return t[d.length + 1] === " " ? { mode: "inline", prefix: pad + d + ". ", rest: t.slice(d.length + 2), kind: "text" } : para;
+  }
+  return para;
+}
+
+export function createMarkdownStream(): MarkdownStream {
+  let mode: "start" | "inline" | "line" = "start";
+  let buf = ""; // start: undecided line prefix; line: whole buffered line
+  let held = ""; // inline: unresolved tail
+  let prev: string | undefined;
+  let started = false;
+  let pendingBlank = false;
+  let prevKind: Kind = "text";
+
+  // Separator owed before a new block line (also records its kind).
+  const sep = (kind: Kind): string => {
+    let out = "";
+    if (started) {
+      const blank = pendingBlank || kind !== "text" || prevKind !== "text";
+      out = blank ? "\n\n" : "\n";
+    }
+    started = true;
+    pendingBlank = false;
+    prevKind = kind;
+    return out;
+  };
+
+  const finishLine = (): string => {
+    const line = buf;
+    buf = "";
+    const t = line.trim();
+    if (RULE.test(t)) return sep("rule") + RULE_TEXT;
+    const h = /^\s*#{1,6} +(.*)$/.exec(line);
+    if (h) {
+      const text = h[1].replace(/(^|\s+)#+\s*$/, "").trim();
+      return sep("heading") + styled(HEADING, text);
+    }
+    return sep("text") + renderInline(line);
+  };
+
+  const feed = (input: string, final: boolean): string => {
+    let data = input;
+    let out = "";
+    for (;;) {
+      const nl = data.indexOf("\n");
+      const seg = nl === -1 ? data : data.slice(0, nl);
+      const complete = nl !== -1 || final;
+      if (mode === "inline") {
+        const r = run(held + seg, complete, prev);
+        out += r.out + (complete ? r.rest : "");
+        held = complete ? "" : r.rest;
+        prev = r.prev;
+        if (nl === -1) break;
+        mode = "start";
+        prev = undefined;
+        data = data.slice(nl + 1);
+      } else if (mode === "line") {
+        buf += seg;
+        if (nl === -1) {
+          if (final) out += finishLine();
+          break;
+        }
+        out += finishLine();
+        mode = "start";
+        data = data.slice(nl + 1);
+      } else {
+        buf += seg;
+        const c = classify(buf, complete);
+        if (c === "more") break;
+        const after = nl === -1 ? "" : data.slice(nl);
+        if (c === "blank") {
+          if (started) pendingBlank = true;
+          buf = "";
+          if (nl === -1) break;
+          data = after.slice(1);
+        } else if ("prefix" in c) {
+          out += sep(c.kind) + c.prefix;
+          buf = "";
+          mode = "inline";
+          prev = undefined;
+          data = c.rest + after;
+        } else {
+          mode = "line";
+          // buf already holds the line so far; continue it with the remainder.
+          data = after;
+          if (nl === -1) {
+            if (final) out += finishLine();
+            break;
+          }
+        }
+      }
+    }
+    if (final) {
+      mode = "start";
+      buf = "";
       held = "";
       prev = undefined;
-      return r.out + r.rest;
-    },
+      started = false;
+      pendingBlank = false;
+      prevKind = "text";
+    }
+    return out;
+  };
+
+  return {
+    write: (delta) => feed(delta, false),
+    flush: () => feed("", true),
   };
 }
