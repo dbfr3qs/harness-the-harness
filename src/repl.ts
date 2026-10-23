@@ -7,7 +7,7 @@ import type { AgentResult } from "./agent.ts";
 import { createAnthropicClient, fetchModelLimits, returnsThinkingOnRequest } from "./client.ts";
 import type { ModelLimits } from "./client.ts";
 import { runMaxTokensCommand } from "./max_tokens_command.ts";
-import { contextAfter, contextSummary, describeContext, fullWarning, WARN_AT } from "./context_meter.ts";
+import { contextAfter, contextGauge, contextSummary, describeContext, fullWarning, WARN_AT } from "./context_meter.ts";
 import type { ContextReading } from "./context_meter.ts";
 import type { ClientHooks } from "./client.ts";
 import { COMMANDS } from "./complete.ts";
@@ -290,7 +290,9 @@ async function main(): Promise<void> {
     const ctx = messages.length || estimate
       ? contextSummary({ used, window: windowNow, ...(contextStale || estimate ? { stale: "estimate" } : {}) })
       : `context empty${windowNow ? ` (${formatTokensShort(windowNow)} window)` : ""}`;
-    const parts = [`${config.provider} / ${config.model}`, ctx];
+    // The gauge's reset would end the status bar's dim styling, so dim is re-applied after it.
+    const gauge = windowNow && (messages.length || estimate) ? `${contextGauge(used / windowNow)}\x1b[2m ` : "";
+    const parts = [`${config.provider} / ${config.model}`, `${gauge}${ctx}`];
     if (running) parts.push(`turn ${turnsThisRun}${Number.isFinite(config.maxTurns) ? `/${config.maxTurns}` : ""}`);
     if (pendingInput.length) parts.push(`${pendingInput.length} queued for the next step`);
     if (config.showThinking) parts.push("thinking shown");

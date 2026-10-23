@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { fetchModelLimits } from "../src/client.ts";
 import { loadConfig } from "../src/config.ts";
-import { contextAfter, contextBar, contextSummary, describeContext, formatTokens } from "../src/context_meter.ts";
+import { contextAfter, contextBar, contextGauge, contextSummary, describeContext, formatTokens } from "../src/context_meter.ts";
 import type { MessageResponse } from "../src/types.ts";
 
 const res = (usage: MessageResponse["usage"]): MessageResponse => ({ id: "m", model: "x", role: "assistant", content: [], stop_reason: "end_turn", usage });
@@ -66,4 +66,15 @@ test("CONTEXT_WINDOW overrides the window when set", () => {
   assert.equal(loadConfig({ ANTHROPIC_API_KEY: "k" }).contextWindow, undefined);
   assert.equal(loadConfig({ ANTHROPIC_API_KEY: "k", CONTEXT_WINDOW: "200000" }).contextWindow, 200_000);
   assert.throws(() => loadConfig({ ANTHROPIC_API_KEY: "k", CONTEXT_WINDOW: "big" }), /CONTEXT_WINDOW must be an integer >= 1/);
+});
+
+const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+test("gauge glyphs match contextBar and strip cleanly", () => {
+  assert.equal(strip(contextGauge(0.3, 10)), contextBar(0.3, 10));
+});
+test("gauge color reflects fill level", () => {
+  assert.match(contextGauge(0.3), /\x1b\[32m/); // green
+  assert.match(contextGauge(0.8), /\x1b\[33m/); // yellow
+  assert.match(contextGauge(0.95), /\x1b\[31m/); // red
+  assert.ok(contextGauge(0.5).endsWith("\x1b[0m"));
 });

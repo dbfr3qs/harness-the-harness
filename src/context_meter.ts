@@ -46,6 +46,12 @@ export function contextBar(fraction: number, width = 30): string {
   return `${"█".repeat(filled)}${"░".repeat(width - filled)}`;
 }
 
+/** A short colored bar for the status bar: green below 70% full, yellow below 90%, red beyond. */
+export function contextGauge(fraction: number, width = 10): string {
+  const color = fraction >= 0.9 ? "\x1b[31m" : fraction >= 0.7 ? "\x1b[33m" : "\x1b[32m";
+  return `${color}${contextBar(fraction, width)}\x1b[0m`;
+}
+
 /** The /context report. */
 export function describeContext(r: ContextReading, model: string, messages: number): string {
   if (messages === 0) {
