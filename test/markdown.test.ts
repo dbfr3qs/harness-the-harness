@@ -147,3 +147,29 @@ test("chunk-split invariance over a fenced block", () => {
 test("fenced code keeps ** - and backticks literal", () => {
   assert.equal(render("~~~\n**b** - x `y`\n~~~"), "\x1b[33m**b** - x `y`\x1b[0m");
 });
+
+test("chunk-split invariance: unclosed fence, indented code, blank line in fence", () => {
+  assertChunkInvariant("```\nabc\ndef");
+  assertChunkInvariant("text\n\n    code()\n    more()\n\nafter");
+  assertChunkInvariant("```\na\n\nb\n```\nz");
+  assertChunkInvariant("- step\n    ```bash\n    cmd\n    ```\nz");
+  assertChunkInvariant("- item\n    more\n\nnext");
+});
+test("a blank line inside a fence is kept", () => {
+  assert.equal(render("```\na\n\nb\n```"), "\x1b[33ma\x1b[0m\n\n\x1b[33mb\x1b[0m");
+});
+test("a closing fence longer than the opener still closes", () => {
+  assert.equal(render("```\na\n`````\nz"), "\x1b[33ma\x1b[0m\n\nz");
+});
+test("a ~~~ line inside a ``` block stays content", () => {
+  assert.equal(render("```\na\n~~~\nb\n```"), "\x1b[33ma\x1b[0m\n\x1b[33m~~~\x1b[0m\n\x1b[33mb\x1b[0m");
+});
+test("an indented fence under a list item opens a real fenced block", () => {
+  assert.equal(render("- step\n    ```bash\n    cmd\n    ```"), "• step\n\n\x1b[33mcmd\x1b[0m");
+});
+test("indented text under a list item is a continuation, not code", () => {
+  assert.equal(render("- item\n    more"), "• item\nmore");
+});
+test("list context ends at a top-level line; indented code then works", () => {
+  assert.equal(render("- item\n\npara\n\n    code()"), "• item\n\npara\n\n\x1b[33mcode()\x1b[0m");
+});

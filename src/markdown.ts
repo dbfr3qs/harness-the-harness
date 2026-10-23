@@ -133,12 +133,15 @@ const RULE_TEXT = DIM + "─".repeat(32) + RESET;
  * Classify a line from the characters seen so far. "more" means the start marker is
  * still ambiguous; `complete` (newline seen or final) forces a decision.
  */
+const isListItem = (r: Start): boolean =>
+  typeof r === "object" && "prefix" in r && /^\s*(•|\d)/.test(r.prefix);
+
 function classify(buf: string, complete: boolean): Start {
   const r = classifyBlock(buf, complete);
   const ind = /^[ \t]*/.exec(buf)![0];
   if (r === "blank" || r === "more" || ind.replace(/\t/g, "    ").length < 4) return r;
   // Indented >= 4: code, unless it is a (nested) list item.
-  if (typeof r === "object" && "prefix" in r && /^\s*(•|\d)/.test(r.prefix)) return r;
+  if (isListItem(r)) return r;
   return { mode: "line", code: true };
 }
 
@@ -187,6 +190,9 @@ function classifyBlock(buf: string, complete: boolean): Start {
 export function createMarkdownStream(): MarkdownStream {
   let mode: "start" | "inline" | "line" | "code" = "start";
   let indented = false; // current "line" is an indented code line
+  let listCtx = false; // previous non-blank block was a list item (or its continuation)
+  let dedent = 0; // indent stripped from the current line while in list context
+  let fenceIndent = 0; // indent of the opening fence; stripped from content lines
   let fence = ""; // open fence marker (char repeated), while mode === "code"
   let buf = ""; // start: undecided line prefix; line: whole buffered line
   let held = ""; // inline: unresolved tail
@@ -219,6 +225,8 @@ export function createMarkdownStream(): MarkdownStream {
     const f = /^\s*(?:(`{3,})[^`]*|(~{3,}).*)$/.exec(line);
     if (f) {
       fence = f[1] ?? f[2];
+      fenceIndent = dedent + /^ */.exec(line)![0].length;
+      dedent = 0;
       mode = "code";
       if (started) pendingBlank = true;
       return "";
@@ -271,7 +279,8 @@ export function createMarkdownStream(): MarkdownStream {
           mode = "start";
           pendingBlank = true;
         } else {
-          out += sep("code") + (line === "" ? "" : CODE + line + RESET);
+          const body = fenceIndent > 0 ? line.replace(new RegExp(`^ {0,${fenceIndent}}`), "") : line;
+          out += sep("code") + (body === "" ? "" : CODE + body + RESET);
         }
         data = data.slice(nl + 1);
       } else if (mode === "line") {
@@ -284,9 +293,26 @@ export function createMarkdownStream(): MarkdownStream {
         out += finishLine();
         data = data.slice(nl + 1);
       } else {
+        if (buf === "") dedent = 0;
         buf += seg;
+        if (listCtx && /^[ \t]/.test(buf)) {
+          // Indented under a list item: continuation (or nested item), never indented code.
+          const t = buf.trimStart();
+          if (t !== "") {
+            const r0 = classifyBlock(buf, complete);
+            if (r0 === "more") break;
+            if (!isListItem(r0)) {
+              dedent = buf.length - t.length;
+              buf = t;
+            }
+          }
+        }
         const c = classify(buf, complete);
         if (c === "more") break;
+        if (c !== "blank") {
+          if (isListItem(c)) listCtx = true;
+          else if (dedent === 0 && !/^[ \t]/.test(buf)) listCtx = false;
+        }
         const after = nl === -1 ? "" : data.slice(nl);
         if (c === "blank") {
           if (started) pendingBlank = true;
@@ -314,6 +340,9 @@ export function createMarkdownStream(): MarkdownStream {
     if (final) {
       mode = "start";
       indented = false;
+      listCtx = false;
+      dedent = 0;
+      fenceIndent = 0;
       fence = "";
       buf = "";
       held = "";
