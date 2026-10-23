@@ -26,6 +26,7 @@ import { DEFAULT_SETTINGS_PATH, formatSettings, loadSettings } from "./settings.
 import type { Settings } from "./settings.ts";
 import { createMarkdownSink, renderMarkdown } from "./markdown.ts";
 import { createScreen } from "./screen.ts";
+import { formatToolResult, toolCallLine } from "./tool_display.ts";
 import { createBatchTerminal, createLineTerminal } from "./terminal.ts";
 import type { Terminal } from "./terminal.ts";
 import { describeTurns, runTurnsCommand } from "./turns_command.ts";
@@ -360,13 +361,13 @@ async function main(): Promise<void> {
     onToolCall: (call) => {
       transcript.log("tool_call", { id: call.id, name: call.name, input: call.input });
       // Always shown, so a run of tool calls with no text in between isn't just a silent wait.
-      say(verbose ? `  → ${call.name} ${JSON.stringify(call.input)}` : dim(`  → ${describeCall(call)}`));
+      say(verbose ? `  → ${call.name} ${JSON.stringify(call.input)}` : toolCallLine(call.name, describeCall(call)));
       activity(`running ${call.name}`);
     },
     onToolResult: (call, outcome) => {
       transcript.log("tool_result", { tool_use_id: call.id, name: call.name, ...outcome });
       if (verbose) say(`  ← ${outcome.isError ? "error" : "ok"}: ${oneLine(outcome.content)}`);
-      else if (outcome.isError) say(dim(`    ✗ ${oneLine(outcome.content.replace(/^Error:\s*/, ""), 100)}`));
+      else for (const line of formatToolResult(outcome.content, { error: outcome.isError })) say(line);
     },
     onUserInput: (texts) => {
       transcript.log("session", { deliveredWhileBusy: texts });
