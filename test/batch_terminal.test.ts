@@ -37,3 +37,7 @@ test("it is not the screen layout and takes no busy input", () => {
   assert.equal(term.onBusyInput, undefined);
   assert.equal(term.inputText(), "");
 });
+
+test("batch terminal is not interactive", () => {
+  assert.equal(createBatchTerminal("p", () => {}).interactive, false);
+});

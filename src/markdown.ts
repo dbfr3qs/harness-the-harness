@@ -359,3 +359,31 @@ export function createMarkdownStream(): MarkdownStream {
     flush: () => feed("", true),
   };
 }
+
+/** Renders a complete Markdown string in one shot. */
+export function renderMarkdown(text: string): string {
+  const s = createMarkdownStream();
+  return s.write(text) + s.flush();
+}
+
+/**
+ * Routes streamed text deltas through a persistent Markdown renderer when enabled; otherwise
+ * writes them raw. flush() writes the renderer's held tail and starts a fresh run.
+ */
+export function createMarkdownSink(
+  write: (s: string) => void,
+  enabled: boolean,
+): { text(delta: string): void; flush(): void } {
+  if (!enabled) return { text: (delta) => write(delta), flush() {} };
+  let stream = createMarkdownStream();
+  const emit = (s: string) => {
+    if (s) write(s);
+  };
+  return {
+    text: (delta) => emit(stream.write(delta)),
+    flush() {
+      emit(stream.flush());
+      stream = createMarkdownStream();
+    },
+  };
+}

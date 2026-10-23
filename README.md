@@ -154,6 +154,10 @@ What you see depends on the model:
 
 Models may skip thinking on simple requests, so not every answer has any.
 
+## Markdown rendering
+
+In an interactive terminal (the screen or a TTY line mode), model output is rendered as styled Markdown: headings, emphasis, inline and fenced code, lists, quotes, links and rules. Piped output and `--prompt-file` batch output stay raw Markdown.
+
 ## Saved defaults
 
 The harness starts with the provider, model, thinking, turns and max tokens settings saved in `harness.json` in the project root. Set things up the way you like during a session, then:

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createMarkdownStream } from "../src/markdown.ts";
+import { createMarkdownSink, createMarkdownStream, renderMarkdown } from "../src/markdown.ts";
 
 const render = (md: string): string => {
   const s = createMarkdownStream();
@@ -172,4 +172,28 @@ test("indented text under a list item is a continuation, not code", () => {
 });
 test("list context ends at a top-level line; indented code then works", () => {
   assert.equal(render("- item\n\npara\n\n    code()"), "• item\n\npara\n\n\x1b[33mcode()\x1b[0m");
+});
+
+test("renderMarkdown is a one-shot render", () => {
+  assert.equal(renderMarkdown("**hi**"), "\x1b[1mhi\x1b[0m");
+});
+test("an enabled sink routes deltas through the renderer", () => {
+  let out = "";
+  const sink = createMarkdownSink((s) => { out += s; }, true);
+  sink.text("**h"); sink.text("i**"); sink.flush();
+  assert.equal(out, "\x1b[1mhi\x1b[0m");
+});
+test("a disabled sink passes deltas through raw", () => {
+  let out = "";
+  const sink = createMarkdownSink((s) => { out += s; }, false);
+  sink.text("**hi**"); sink.flush();
+  assert.equal(out, "**hi**");
+});
+test("flush resets the sink for the next run", () => {
+  let out = "";
+  const sink = createMarkdownSink((s) => { out += s; }, true);
+  sink.text("`a"); sink.flush();      // unterminated → literal
+  out = "";
+  sink.text("`b`"); sink.flush();      // fresh state
+  assert.equal(out, "\x1b[33mb\x1b[0m");
 });
