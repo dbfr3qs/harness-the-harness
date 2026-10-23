@@ -119,11 +119,11 @@ export function renderInline(text: string): string {
   return run(text, true, undefined).out;
 }
 
-type Kind = "text" | "heading" | "rule";
+type Kind = "text" | "heading" | "rule" | "code";
 type Start =
   | "more"
   | "blank"
-  | { mode: "line" }
+  | { mode: "line"; code?: boolean }
   | { mode: "inline"; prefix: string; rest: string; kind: Kind };
 
 const RULE = /^(?:-{3,}|\*{3,}|_{3,})$/;
@@ -134,6 +134,15 @@ const RULE_TEXT = DIM + "─".repeat(32) + RESET;
  * still ambiguous; `complete` (newline seen or final) forces a decision.
  */
 function classify(buf: string, complete: boolean): Start {
+  const r = classifyBlock(buf, complete);
+  const ind = /^[ \t]*/.exec(buf)![0];
+  if (r === "blank" || r === "more" || ind.replace(/\t/g, "    ").length < 4) return r;
+  // Indented >= 4: code, unless it is a (nested) list item.
+  if (typeof r === "object" && "prefix" in r && /^\s*(•|\d)/.test(r.prefix)) return r;
+  return { mode: "line", code: true };
+}
+
+function classifyBlock(buf: string, complete: boolean): Start {
   const indent = /^[ \t]*/.exec(buf)![0];
   const t = buf.slice(indent.length);
   const pad = " ".repeat(Math.floor(indent.length / 2) * 2);
@@ -146,6 +155,12 @@ function classify(buf: string, complete: boolean): Start {
     if (m.length > 6) return para;
     if (t.length === m.length) return undecided;
     return t[m.length] === " " ? { mode: "line" } : para;
+  }
+  if (c === "`" || c === "~") {
+    let r = 1;
+    while (t[r] === c) r++;
+    if (r >= 3) return { mode: "line" };
+    return t.length === r ? undecided : para;
   }
   if (c === ">") {
     if (t.length === 1) return undecided;
@@ -170,7 +185,9 @@ function classify(buf: string, complete: boolean): Start {
 }
 
 export function createMarkdownStream(): MarkdownStream {
-  let mode: "start" | "inline" | "line" = "start";
+  let mode: "start" | "inline" | "line" | "code" = "start";
+  let indented = false; // current "line" is an indented code line
+  let fence = ""; // open fence marker (char repeated), while mode === "code"
   let buf = ""; // start: undecided line prefix; line: whole buffered line
   let held = ""; // inline: unresolved tail
   let prev: string | undefined;
@@ -182,7 +199,7 @@ export function createMarkdownStream(): MarkdownStream {
   const sep = (kind: Kind): string => {
     let out = "";
     if (started) {
-      const blank = pendingBlank || kind !== "text" || prevKind !== "text";
+      const blank = pendingBlank || kind !== prevKind || kind === "heading" || kind === "rule";
       out = blank ? "\n\n" : "\n";
     }
     started = true;
@@ -194,6 +211,18 @@ export function createMarkdownStream(): MarkdownStream {
   const finishLine = (): string => {
     const line = buf;
     buf = "";
+    if (indented) {
+      indented = false;
+      const body = line.startsWith("\t") ? line.slice(1) : line.replace(/^ {1,4}/, "");
+      return sep("code") + CODE + body + RESET;
+    }
+    const f = /^\s*(?:(`{3,})[^`]*|(~{3,}).*)$/.exec(line);
+    if (f) {
+      fence = f[1] ?? f[2];
+      mode = "code";
+      if (started) pendingBlank = true;
+      return "";
+    }
     const t = line.trim();
     if (RULE.test(t)) return sep("rule") + RULE_TEXT;
     const h = /^\s*#{1,6} +(.*)$/.exec(line);
@@ -227,14 +256,32 @@ export function createMarkdownStream(): MarkdownStream {
         mode = "start";
         prev = undefined;
         data = data.slice(nl + 1);
+      } else if (mode === "code") {
+        buf += seg;
+        if (nl === -1) {
+          const cl = /^\s*(`+|~+)\s*$/.exec(buf);
+          const closes = cl !== null && cl[1][0] === fence[0] && cl[1].length >= fence.length;
+          if (final && buf !== "" && !closes) out += sep("code") + CODE + buf + RESET;
+          break;
+        }
+        const line = buf;
+        buf = "";
+        const close = /^\s*(`+|~+)\s*$/.exec(line);
+        if (close && close[1][0] === fence[0] && close[1].length >= fence.length) {
+          mode = "start";
+          pendingBlank = true;
+        } else {
+          out += sep("code") + (line === "" ? "" : CODE + line + RESET);
+        }
+        data = data.slice(nl + 1);
       } else if (mode === "line") {
         buf += seg;
         if (nl === -1) {
           if (final) out += finishLine();
           break;
         }
-        out += finishLine();
         mode = "start";
+        out += finishLine();
         data = data.slice(nl + 1);
       } else {
         buf += seg;
@@ -254,6 +301,7 @@ export function createMarkdownStream(): MarkdownStream {
           data = c.rest + after;
         } else {
           mode = "line";
+          indented = !!c.code;
           // buf already holds the line so far; continue it with the remainder.
           data = after;
           if (nl === -1) {
@@ -265,6 +313,8 @@ export function createMarkdownStream(): MarkdownStream {
     }
     if (final) {
       mode = "start";
+      indented = false;
+      fence = "";
       buf = "";
       held = "";
       prev = undefined;

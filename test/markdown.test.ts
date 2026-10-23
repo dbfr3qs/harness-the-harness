@@ -125,3 +125,25 @@ test("an empty heading emits no empty styled span", () => {
   assert.equal(render("# "), "");
   assert.equal(render("a\n# \nb"), "a\n\nb");
 });
+
+test("fenced code is colored verbatim; fences removed; markup not parsed", () => {
+  assert.equal(render("```\nx = 1\n# not a heading\n```"),
+    "\x1b[33mx = 1\x1b[0m\n\x1b[33m# not a heading\x1b[0m");
+});
+test("a fenced block gets one blank line before and after", () => {
+  assert.equal(render("before\n```\ncode\n```\nafter"),
+    "before\n\n\x1b[33mcode\x1b[0m\n\nafter");
+});
+test("an unclosed fence flushes its content as code", () => {
+  assert.equal(render("```\nabc\ndef"), "\x1b[33mabc\x1b[0m\n\x1b[33mdef\x1b[0m");
+});
+test("a 4-space indented line is code (first 4 spaces stripped)", () => {
+  assert.equal(render("text\n\n    code()\n\nmore"),
+    "text\n\n\x1b[33mcode()\x1b[0m\n\nmore");
+});
+test("chunk-split invariance over a fenced block", () => {
+  assertChunkInvariant("text\n```js\nconst a = `t`;\n```\nmore");
+});
+test("fenced code keeps ** - and backticks literal", () => {
+  assert.equal(render("~~~\n**b** - x `y`\n~~~"), "\x1b[33m**b** - x `y`\x1b[0m");
+});
