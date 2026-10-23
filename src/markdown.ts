@@ -1,5 +1,7 @@
 // Streaming Markdown -> ANSI renderer. Pure: no terminal access, timers, or globals.
 
+import { highlightCodeLine, isHighlightable } from "./highlight.ts";
+
 export const RESET = "\x1b[0m";
 export const CODE = "\x1b[33m";
 export const BOLD = "\x1b[1m";
@@ -56,7 +58,7 @@ function resolve(s: string, i: number, final: boolean, prev: string | undefined)
     const text = s.slice(i + 1, rb);
     const url = s.slice(rb + 2, rp);
     if (text === "") return "literal";
-    return { out: styled(LINK, text) + " " + DIM + "(" + url + ")" + RESET, len: rp + 1 - i };
+    return { out: "\x1b]8;;" + url + "\x1b\\" + styled(LINK, text) + "\x1b]8;;\x1b\\ " + DIM + "(" + url + ")" + RESET, len: rp + 1 - i };
   }
 
   // "*" or "_"
@@ -198,13 +200,51 @@ function classifyBlock(buf: string, complete: boolean): Start {
   return para;
 }
 
-export function createMarkdownStream(): MarkdownStream {
+export type MarkdownOptions = { dim?: boolean };
+
+// Dim mode: all printable text is dim. Stateful so chunking can't change the bytes: DIM opens at the
+// first printable char of a line, SGR escapes are dropped (already dim), RESET closes at each newline.
+function createDimmer(): { map(s: string): string; end(): string } {
+  let open = false;
+  return {
+    map(input) {
+      let out = "";
+      for (const part of input.split(/(\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)|\x1b\[[0-9;]*m|\n)/)) {
+        if (part === "") continue;
+        if (part === "\n") {
+          if (open) out += RESET;
+          open = false;
+          out += part;
+        } else if (part.startsWith("\x1b]")) {
+          out += part; // OSC (hyperlink): not an SGR and not printable; pass through untouched
+        } else if (part.startsWith("\x1b[")) {
+          continue;
+        } else {
+          if (!open) out += DIM;
+          open = true;
+          out += part;
+        }
+      }
+      return out;
+    },
+    end() {
+      const r = open ? RESET : "";
+      open = false;
+      return r;
+    },
+  };
+}
+
+export function createMarkdownStream(opts: MarkdownOptions = {}): MarkdownStream {
+  const dim = opts.dim === true;
+  const dimmer = createDimmer();
   let mode: "start" | "inline" | "line" | "code" = "start";
   let indented = false; // current "line" is an indented code line
   let listCtx = false; // previous non-blank block was a list item (or its continuation)
   let dedent = 0; // indent stripped from the current line while in list context
   let fenceIndent = 0; // indent of the opening fence; stripped from content lines
   let fence = ""; // open fence marker (char repeated), while mode === "code"
+  let lang = ""; // info string (first word) of the open fence
   let buf = ""; // start: undecided line prefix; line: whole buffered line
   let held = ""; // inline: unresolved tail
   let prev: string | undefined;
@@ -225,6 +265,9 @@ export function createMarkdownStream(): MarkdownStream {
     return out;
   };
 
+  // No/unrecognized info string: plain code.
+  const codeLine = (l: string): string => (dim || lang === "" || !isHighlightable(lang) ? CODE + l + RESET : highlightCodeLine(l, lang));
+
   const finishLine = (): string => {
     const line = buf;
     buf = "";
@@ -236,6 +279,7 @@ export function createMarkdownStream(): MarkdownStream {
     const f = /^\s*(?:(`{3,})[^`]*|(~{3,}).*)$/.exec(line);
     if (f) {
       fence = f[1] ?? f[2];
+      lang = /^\s*(?:`{3,}|~{3,})\s*(\S*)/.exec(line)![1];
       fenceIndent = dedent + /^ */.exec(line)![0].length;
       dedent = 0;
       mode = "code";
@@ -280,7 +324,7 @@ export function createMarkdownStream(): MarkdownStream {
         if (nl === -1) {
           const cl = /^\s*(`+|~+)\s*$/.exec(buf);
           const closes = cl !== null && cl[1][0] === fence[0] && cl[1].length >= fence.length;
-          if (final && buf !== "" && !closes) out += sep("code") + CODE + buf + RESET;
+          if (final && buf !== "" && !closes) out += sep("code") + codeLine(buf);
           break;
         }
         const line = buf;
@@ -291,7 +335,7 @@ export function createMarkdownStream(): MarkdownStream {
           pendingBlank = true;
         } else {
           const body = fenceIndent > 0 ? line.replace(new RegExp(`^ {0,${fenceIndent}}`), "") : line;
-          out += sep("code") + (body === "" ? "" : CODE + body + RESET);
+          out += sep("code") + (body === "" ? "" : codeLine(body));
         }
         data = data.slice(nl + 1);
       } else if (mode === "line") {
@@ -355,6 +399,7 @@ export function createMarkdownStream(): MarkdownStream {
       dedent = 0;
       fenceIndent = 0;
       fence = "";
+      lang = "";
       buf = "";
       held = "";
       prev = undefined;
@@ -366,14 +411,14 @@ export function createMarkdownStream(): MarkdownStream {
   };
 
   return {
-    write: (delta) => feed(delta, false),
-    flush: () => feed("", true),
+    write: (delta) => (dim ? dimmer.map(feed(delta, false)) : feed(delta, false)),
+    flush: () => (dim ? dimmer.map(feed("", true)) + dimmer.end() : feed("", true)),
   };
 }
 
 /** Renders a complete Markdown string in one shot. */
-export function renderMarkdown(text: string): string {
-  const s = createMarkdownStream();
+export function renderMarkdown(text: string, opts: MarkdownOptions = {}): string {
+  const s = createMarkdownStream(opts);
   return s.write(text) + s.flush();
 }
 
@@ -384,9 +429,10 @@ export function renderMarkdown(text: string): string {
 export function createMarkdownSink(
   write: (s: string) => void,
   enabled: boolean,
+  opts: MarkdownOptions = {},
 ): { text(delta: string): void; flush(): void } {
   if (!enabled) return { text: (delta) => write(delta), flush() {} };
-  let stream = createMarkdownStream();
+  let stream = createMarkdownStream(opts);
   const emit = (s: string) => {
     if (s) write(s);
   };
@@ -394,7 +440,7 @@ export function createMarkdownSink(
     text: (delta) => emit(stream.write(delta)),
     flush() {
       emit(stream.flush());
-      stream = createMarkdownStream();
+      stream = createMarkdownStream(opts);
     },
   };
 }

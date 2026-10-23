@@ -57,7 +57,7 @@ test("a standalone asterisk stays literal", () => {
   assert.equal(render("2 * 3 = 6"), "2 * 3 = 6");
 });
 test("a link shows styled text then a dim URL", () => {
-  assert.equal(render("see [docs](http://x)"), "see \x1b[4mdocs\x1b[0m \x1b[2m(http://x)\x1b[0m");
+  assert.equal(render("see [docs](http://x)"), "see \x1b]8;;http://x\x1b\\\x1b[4mdocs\x1b[0m\x1b]8;;\x1b\\ \x1b[2m(http://x)\x1b[0m");
 });
 test("unterminated emphasis flushes literally", () => {
   assert.equal(render("**oops"), "**oops");
@@ -165,7 +165,7 @@ test("a ~~~ line inside a ``` block stays content", () => {
   assert.equal(render("```\na\n~~~\nb\n```"), "\x1b[33ma\x1b[0m\n\x1b[33m~~~\x1b[0m\n\x1b[33mb\x1b[0m");
 });
 test("an indented fence under a list item opens a real fenced block", () => {
-  assert.equal(render("- step\n    ```bash\n    cmd\n    ```"), "• step\n\n\x1b[33mcmd\x1b[0m");
+  assert.equal(render("- step\n    ```bash\n    cmd\n    ```"), "• step\n\n\x1b[33m\x1b[35mcmd\x1b[0m"); // bash: command word highlighted
 });
 test("indented text under a list item is a continuation, not code", () => {
   assert.equal(render("- item\n    more"), "• item\nmore");
@@ -212,4 +212,81 @@ test("unterminated triple marker is literal, never stalls or leaks", () => {
 test("chunk-split invariance over triple markers", () => {
   assertChunkInvariant("a ***b*** c");
   assertChunkInvariant("a ___b___ c ***d\ne*** f");
+});
+
+test("fenced code is syntax-highlighted by its info string", () => {
+  const out = render("```python\nx = \"hi\" # c\n```");
+  assert.match(out, /\x1b\[32m"hi"/);
+  assert.match(out, /\x1b\[2m# c/);
+  assert.ok(out.replace(/\x1b\[[0-9;]*m/g, "").includes('x = "hi" # c'));
+});
+test("fenced code with no/unknown info string stays plain yellow", () => {
+  assert.equal(render("```\nplain\n```"), "\x1b[33mplain\x1b[0m");
+});
+test("highlighted fenced block is still chunk-invariant", () => {
+  assertChunkInvariant("text\n```js\nconst a = 1; // x\n```\nmore");
+});
+
+test("unrecognized fence languages stay plain yellow", () => {
+  for (const l of ["text", "output", "console", "foo"])
+    assert.equal(render("```" + l + "\n12 # a\n```"), "\x1b[33m12 # a\x1b[0m", l);
+});
+test("recognized fence language still highlights", () => {
+  assert.match(render('```python\nx = "hi"\n```'), /\x1b\[32m"hi"/);
+});
+
+const renderDim = (md: string) => { const s = createMarkdownStream({ dim: true }); return s.write(md) + s.flush(); };
+test("dim mode styles everything dim, no palette colors, markers gone", () => {
+  const out = renderDim("# H\n\n**b** `c`");
+  assert.ok(!out.includes("\x1b[1;36m") && !out.includes("\x1b[33m")); // no heading cyan / code yellow
+  assert.match(out, /\x1b\[2m/);                                       // dim present
+  const stripped = out.replace(/\x1b\[[0-9;]*m/g, "");
+  assert.ok(!stripped.includes("#") && !stripped.includes("**") && !stripped.includes("`")); // markers removed
+});
+test("dim mode still ends reset and is chunk-invariant", () => {
+  const whole = renderDim("a **b** c");
+  assert.equal(whole.match(/\x1b\[[0-9;]*m/g)!.at(-1), "\x1b[0m"); // last style is a reset (text may follow it)
+  for (let i = 0; i <= "a **b** c".length; i++) {
+    const s = createMarkdownStream({ dim: true });
+    assert.equal(s.write("a **b** c".slice(0, i)) + s.write("a **b** c".slice(i)) + s.flush(), whole);
+  }
+});
+test("dim mode does not syntax-highlight fenced code", () => {
+  const out = renderDim("```js\nconst x = 1;\n```");
+  assert.ok(!/\x1b\[(?!0m|2m)[0-9;]*m/.test(out));
+  assert.ok(out.includes("const x = 1;"));
+});
+
+const unDimmed = (out: string) => out.replace(/\x1b\[2m[^\x1b]*?\x1b\[0m/g, "").replace(/\n/g, "");
+test("dim mode dims plain prose", () => {
+  const out = renderDim("plain words");
+  assert.ok(out.startsWith("\x1b[2m") && out.endsWith("\x1b[0m"));
+  assert.equal(unDimmed(out), "");
+});
+test("dim mode keeps text after a span dim", () => {
+  const out = renderDim("a **b** c");
+  assert.equal(unDimmed(out), "");
+  assert.ok(out.endsWith("\x1b[0m"));
+});
+test("dim mode dims mixed blocks and keeps separators clean", () => {
+  const out = renderDim("# H\n\npara\n\n- item");
+  assert.equal(unDimmed(out), "");
+  assert.ok(out.endsWith("\x1b[0m"));
+  assert.ok(!/\x1b\[2m\n/.test(out));
+  assert.ok(out.includes("\x1b[2mpara\x1b[0m") && out.includes("item"));
+});
+
+test("a link is wrapped in an OSC 8 hyperlink and keeps the dim url", () => {
+  const out = render("[docs](http://x)");
+  assert.ok(out.includes("\x1b]8;;http://x\x1b\\")); // OSC 8 open
+  assert.ok(out.includes("\x1b]8;;\x1b\\"));          // OSC 8 close
+  assert.match(out, /\x1b\[4mdocs\x1b\[0m/);          // styled text
+  assert.match(out, /\x1b\[2m\(http:\/\/x\)\x1b\[0m/); // dim url kept
+});
+
+test("dim mode passes OSC 8 through and still dims the link text", () => {
+  const out = renderDim("[docs](http://x)");
+  assert.ok(out.includes("\x1b]8;;http://x\x1b\\"));
+  assert.ok(out.includes("\x1b]8;;\x1b\\"));
+  assert.match(out, /\x1b\]8;;http:\/\/x\x1b\\\x1b\[2mdocs/);
 });

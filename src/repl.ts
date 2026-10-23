@@ -7,7 +7,7 @@ import type { AgentResult } from "./agent.ts";
 import { createAnthropicClient, fetchModelLimits, returnsThinkingOnRequest } from "./client.ts";
 import type { ModelLimits } from "./client.ts";
 import { runMaxTokensCommand } from "./max_tokens_command.ts";
-import { contextAfter, contextSummary, describeContext, fullWarning, WARN_AT } from "./context_meter.ts";
+import { contextAfter, contextGauge, contextSummary, describeContext, fullWarning, WARN_AT } from "./context_meter.ts";
 import type { ContextReading } from "./context_meter.ts";
 import type { ClientHooks } from "./client.ts";
 import { COMMANDS } from "./complete.ts";
@@ -26,6 +26,7 @@ import { DEFAULT_SETTINGS_PATH, formatSettings, loadSettings } from "./settings.
 import type { Settings } from "./settings.ts";
 import { createMarkdownSink, renderMarkdown } from "./markdown.ts";
 import { createScreen } from "./screen.ts";
+import { formatToolResult, toolCallLine } from "./tool_display.ts";
 import { createBatchTerminal, createLineTerminal } from "./terminal.ts";
 import type { Terminal } from "./terminal.ts";
 import { describeTurns, runTurnsCommand } from "./turns_command.ts";
@@ -47,6 +48,7 @@ import { formatDiff, formatInventory, libraryMenuItems, parseLibraryCommand } fr
 import type { CompiledPolicy } from "./tools/web_policy.ts";
 import type { AgentHooks } from "./agent.ts";
 import { addUserText } from "./history.ts";
+import { turnRule } from "./turn_marks.ts";
 import type { Message, ToolUseBlock } from "./types.ts";
 
 const SYSTEM_PROMPT =
@@ -230,7 +232,10 @@ async function main(): Promise<void> {
 
   const transcript = createTranscriptLogger(config.transcriptPath, { secrets: config.secrets });
 
-  // Thinking prints dimmed, after a "✻", with continuation lines indented to match.
+  // Thinking renders as dim Markdown after a "✻". Only one sink is active at a time: showThinking
+  // flushes the answer sink before thinking writes, and endThinking flushes the thinking sink
+  // (onTextDelta/say/onRequest/onResponse all call it) before answer text or anything else resumes.
+  const thinkSink = createMarkdownSink((s) => term.write(s), term.interactive, { dim: true });
   let inThinking = false;
   const showThinking = (text: string) => {
     mdSink.flush();
@@ -239,10 +244,11 @@ async function main(): Promise<void> {
       term.write(dim("✻ "));
       inThinking = true;
     }
-    term.write(dim(text.replace(/\n/g, "\n  ")));
+    thinkSink.text(text);
   };
   const endThinking = () => {
     if (!inThinking) return;
+    thinkSink.flush();
     inThinking = false;
     term.endLine();
   };
@@ -284,7 +290,9 @@ async function main(): Promise<void> {
     const ctx = messages.length || estimate
       ? contextSummary({ used, window: windowNow, ...(contextStale || estimate ? { stale: "estimate" } : {}) })
       : `context empty${windowNow ? ` (${formatTokensShort(windowNow)} window)` : ""}`;
-    const parts = [`${config.provider} / ${config.model}`, ctx];
+    // The gauge's reset would end the status bar's dim styling, so dim is re-applied after it.
+    const gauge = windowNow && (messages.length || estimate) ? `${contextGauge(used / windowNow)}\x1b[2m ` : "";
+    const parts = [`${config.provider} / ${config.model}`, `${gauge}${ctx}`];
     if (running) parts.push(`turn ${turnsThisRun}${Number.isFinite(config.maxTurns) ? `/${config.maxTurns}` : ""}`);
     if (pendingInput.length) parts.push(`${pendingInput.length} queued for the next step`);
     if (config.showThinking) parts.push("thinking shown");
@@ -360,13 +368,13 @@ async function main(): Promise<void> {
     onToolCall: (call) => {
       transcript.log("tool_call", { id: call.id, name: call.name, input: call.input });
       // Always shown, so a run of tool calls with no text in between isn't just a silent wait.
-      say(verbose ? `  → ${call.name} ${JSON.stringify(call.input)}` : dim(`  → ${describeCall(call)}`));
+      say(verbose ? `  → ${call.name} ${JSON.stringify(call.input)}` : toolCallLine(call.name, describeCall(call)));
       activity(`running ${call.name}`);
     },
     onToolResult: (call, outcome) => {
       transcript.log("tool_result", { tool_use_id: call.id, name: call.name, ...outcome });
       if (verbose) say(`  ← ${outcome.isError ? "error" : "ok"}: ${oneLine(outcome.content)}`);
-      else if (outcome.isError) say(dim(`    ✗ ${oneLine(outcome.content.replace(/^Error:\s*/, ""), 100)}`));
+      else for (const line of formatToolResult(outcome.content, { error: outcome.isError })) say(line);
     },
     onUserInput: (texts) => {
       transcript.log("session", { deliveredWhileBusy: texts });
@@ -747,6 +755,7 @@ async function main(): Promise<void> {
   };
 
   const lines = term.lines()[Symbol.asyncIterator]();
+  let userTurns = 0; // turns started from a user prompt; the first has nothing above it to separate from
   while (true) {
     let raw: string;
     if (autoSend.length) {
@@ -946,6 +955,7 @@ async function main(): Promise<void> {
       text += `\n\n${restoreNote}`;
       restoreNote = undefined;
     }
+    if (term.interactive && !term.screen && userTurns++ > 0) say(turnRule(process.stdout.columns ?? 80));
     const undo = addUserText(messages, text);
     const lengthAfterInput = messages.length;
     const delivered: string[] = []; // messages typed during this run that reached the model

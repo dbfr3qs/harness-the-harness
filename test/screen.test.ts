@@ -57,7 +57,25 @@ test("Enter sends what was typed, and it's echoed above the input box", async ()
   await t.type("\r");
   assert.deepEqual(await lines.next(), { done: false, value: "hello there" });
   assert.equal(t.screen.inputText(), "");
-  assert.match(t.output(), /> hello there\r\n/);
+  assert.match(t.output(), /❯ hello there\r\n/);
+  assert.ok(t.raw().includes("\x1b[36m❯ \x1b[0mhello there"), "cyan glyph, unstyled text");
+  t.screen.close();
+});
+
+test("a rule separates turns: none before the first prompt, one above each later prompt", async () => {
+  const t = fakeTerminal(40);
+  const lines = t.screen.lines()[Symbol.asyncIterator]();
+  const ruleThenPrompt = /(─+)\x1b\[0m\r?\n\x1b\[36m❯ \x1b\[0m(\w+)/g; // the panel border also uses ─, so match adjacency
+  await t.type("one\r");
+  await lines.next();
+  const afterFirst = t.raw();
+  assert.equal([...afterFirst.matchAll(ruleThenPrompt)].length, 0, "no rule above the first prompt");
+  await t.type("two\r");
+  await lines.next();
+  const hits = [...t.raw().slice(afterFirst.length).matchAll(ruleThenPrompt)];
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0][2], "two");
+  assert.ok(hits[0][1].length > 0 && hits[0][1].length <= 39, "rule never reaches the last column");
   t.screen.close();
 });
 
@@ -268,4 +286,8 @@ test("after a resize, the cursor position reply is used and never typed into the
 test("the screen terminal is interactive", () => {
   const t = fakeTerminal();
   assert.equal(t.screen.interactive, true);
+});
+
+test("textWidth ignores OSC 8 hyperlink sequences", () => {
+  assert.equal(textWidth("\x1b]8;;http://x\x1b\\docs\x1b]8;;\x1b\\"), 4);
 });
