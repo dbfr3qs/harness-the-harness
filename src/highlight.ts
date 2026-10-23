@@ -86,6 +86,7 @@ export function highlightCodeLine(line: string, lang?: string): string {
     out += c;
     i++;
   }
-  if (out.endsWith(BASE)) out = out.slice(0, -BASE.length);
+  if (out.endsWith(RESET + BASE)) out = out.slice(0, -(RESET + BASE).length);
+  else if (out.endsWith(BASE)) out = out.slice(0, -BASE.length);
   return BASE + out + RESET;
 }

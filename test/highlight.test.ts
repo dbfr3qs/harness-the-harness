@@ -35,3 +35,9 @@ test("shell flags and commands are colored; identifiers with digits are not numb
   assert.match(highlightCodeLine("ls -la", "sh"), /\x1b\[35m-la\x1b/);
   assert.equal(highlightCodeLine("x1", "js"), "\x1b[33mx1\x1b[0m");
 });
+test("a line ending in a token ends in exactly one reset", () => {
+  assert.equal(highlightCodeLine("a 1", "js"), "\x1b[33ma \x1b[35m1\x1b[0m");
+  const out = highlightCodeLine("x # c", "python");
+  assert.ok(out.endsWith("c\x1b[0m") && !out.endsWith("\x1b[0m\x1b[0m"));
+  assert.equal(strip(out), "x # c");
+});
