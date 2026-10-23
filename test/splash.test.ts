@@ -27,11 +27,13 @@ test("phase glyphs reflect state", () => {
   assert.ok(s.some((l) => l === "     registry")); // pending: no glyph, just padding
 });
 
-test("the spinner frame advances and the 'starting up' line hides when all settled", () => {
+test("the 'starting up' spinner line is always shown and its frame advances", () => {
   const active = [{ label: "x", state: "active" as const }];
   assert.ok(renderSplash(active, 1).some((l) => l.includes(SPINNER_BRAILLE[1]!)));
+  // shown even once every phase has settled — the splash stays up (and animating) until finish() clears it
   const settled = [{ label: "x", state: "done" as const }];
-  assert.ok(!renderSplash(settled, 0).some((l) => strip(l).includes("starting up")));
+  assert.ok(renderSplash(settled, 2).some((l) => strip(l).includes("starting up")));
+  assert.ok(renderSplash(settled, 2).some((l) => l.includes(SPINNER_BRAILLE[2]!)));
 });
 
 test("every colored line ends in a reset (no leak)", () => {

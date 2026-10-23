@@ -38,11 +38,11 @@ export function renderSplash(phases: readonly SplashPhase[], frame: number): str
   for (const l of SPLASH_LOGO) lines.push(`${CYAN}${l}${RESET}`);
   lines.push("");
 
-  const settled = phases.every((p) => p.state === "done" || p.state === "failed");
-  if (!settled) {
-    lines.push(`${CYAN}${PAD}${spin} starting up…${RESET}`);
-    lines.push("");
-  }
+  // The spinner line is always shown while the splash is up — its mere presence means "still
+  // starting", even once every named phase has ticked (slow work can continue, e.g. a resume's
+  // session restore). The controller clears the whole block on finish().
+  lines.push(`${CYAN}${PAD}${spin} starting up…${RESET}`);
+  lines.push("");
 
   for (const p of phases) {
     if (p.state === "done") lines.push(`${GREEN}${PAD}✓ ${p.label}${RESET}`);

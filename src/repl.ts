@@ -454,7 +454,7 @@ async function main(): Promise<void> {
   // A startup splash (interactive only): the wordmark, a spinner, and a live checklist of the boot
   // phases while MCP servers, the library and the registry come up. Config and the web policy are
   // already loaded by now, so they start ticked.
-  const splash = createSplash(term, ["config", "web policy", "MCP servers", "library", "registry"]);
+  const splash = createSplash(term, ["config", "web policy", "MCP servers", "library", "registry", ...(resumed ? ["restore session"] : [])]);
   splash.set("config", "done");
   splash.set("web policy", "done");
 
@@ -508,13 +508,16 @@ async function main(): Promise<void> {
   );
   splash.set("registry", "done");
 
-  // Resume: rebuild the loaded working set and seed the conversation.
+  // Resume: rebuild the loaded working set and seed the conversation. Restoring the library can
+  // restart the session's enabled MCP servers, so it is the real wait on a resume — give it a phase.
+  if (resumed) splash.set("restore session", "active");
   let restoreNote: string | undefined;
   if (resumed?.library && librarySession) {
     const { warnings } = await librarySession.restore(resumed.library);
     for (const w of warnings) transcript.log("error", { message: `session restore: ${w}` });
     if (warnings.length) restoreNote = `[harness note: this session was resumed; some saved library items did not restore: ${warnings.join(" ")}]`;
   }
+  if (resumed) splash.set("restore session", "done");
   const messages: Message[] = resumed ? [...resumed.messages] : [];
   const store = createSessionStore(resolve(config.workspaceRoot, sessionsDir), { secrets: config.secrets });
   let saved = false;
