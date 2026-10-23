@@ -1,6 +1,6 @@
 // Streaming Markdown -> ANSI renderer. Pure: no terminal access, timers, or globals.
 
-import { highlightCodeLine } from "./highlight.ts";
+import { highlightCodeLine, isHighlightable } from "./highlight.ts";
 
 export const RESET = "\x1b[0m";
 export const CODE = "\x1b[33m";
@@ -228,8 +228,8 @@ export function createMarkdownStream(): MarkdownStream {
     return out;
   };
 
-  // No info string: plain code (nothing to pick a grammar from).
-  const codeLine = (l: string): string => (lang === "" ? CODE + l + RESET : highlightCodeLine(l, lang));
+  // No/unrecognized info string: plain code.
+  const codeLine = (l: string): string => (lang === "" || !isHighlightable(lang) ? CODE + l + RESET : highlightCodeLine(l, lang));
 
   const finishLine = (): string => {
     const line = buf;

@@ -226,3 +226,11 @@ test("fenced code with no/unknown info string stays plain yellow", () => {
 test("highlighted fenced block is still chunk-invariant", () => {
   assertChunkInvariant("text\n```js\nconst a = 1; // x\n```\nmore");
 });
+
+test("unrecognized fence languages stay plain yellow", () => {
+  for (const l of ["text", "output", "console", "foo"])
+    assert.equal(render("```" + l + "\n12 # a\n```"), "\x1b[33m12 # a\x1b[0m", l);
+});
+test("recognized fence language still highlights", () => {
+  assert.match(render('```python\nx = "hi"\n```'), /\x1b\[32m"hi"/);
+});

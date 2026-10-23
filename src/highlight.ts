@@ -24,6 +24,13 @@ const SEPARATORS = new Set(["|", ";", "&", "(", "{"]);
 const isWord = (c: string | undefined): boolean => c !== undefined && /[A-Za-z0-9_]/.test(c);
 const isSpace = (c: string | undefined): boolean => c === " " || c === "\t";
 
+/** True only for languages the highlighter recognizes; others should render plain. */
+export function isHighlightable(lang: string): boolean {
+  const key = lang.trim().toLowerCase();
+  const kind = ALIASES[key] ?? key;
+  return kind === "shell" || HASH_LANGS.has(kind) || SLASH_LANGS.has(kind);
+}
+
 export function highlightCodeLine(line: string, lang?: string): string {
   const key = (lang ?? "").trim().toLowerCase();
   const kind = ALIASES[key] ?? key;
