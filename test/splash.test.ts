@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { renderSplash, SPLASH_LOGO, SPINNER_BRAILLE } from "../src/splash.ts";
+import { renderSplash, SPLASH_LOGO, SPINNER_BRAILLE, createSplash } from "../src/splash.ts";
+import type { Terminal } from "../src/terminal.ts";
 
 const strip = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
 
@@ -37,4 +38,36 @@ test("every colored line ends in a reset (no leak)", () => {
   for (const line of renderSplash([{ label: "config", state: "done" }], 0)) {
     if (line.includes("\x1b[")) assert.ok(line.endsWith("\x1b[0m"), `unreset line: ${JSON.stringify(line)}`);
   }
+});
+
+const fakeScreenTerm = () => {
+  const notes: string[][] = [];
+  const term = { screen: true, interactive: true, notes: (l: string[]) => { notes.push(l); }, write() {} } as unknown as Terminal;
+  return { term, notes };
+};
+
+test("screen splash renders phases to notes and clears on finish", async () => {
+  const { term, notes } = fakeScreenTerm();
+  const s = createSplash(term, ["MCP servers", "library"]);
+  s.set("MCP servers", "done");
+  assert.ok(notes.at(-1)!.some((l) => l.replace(/\x1b\[[0-9;]*m/g, "") === "   ✓ MCP servers"));
+  await s.finish();
+  assert.deepEqual(notes.at(-1), []); // cleared
+});
+
+test("finish enforces the ~400ms minimum", async () => {
+  const { term } = fakeScreenTerm();
+  const s = createSplash(term, ["x"]);
+  const t0 = Date.now();
+  await s.finish();
+  assert.ok(Date.now() - t0 >= 380, `finished too fast: ${Date.now() - t0}ms`);
+});
+
+test("batch/non-interactive splash is a silent no-op", async () => {
+  let wrote = false;
+  const term = { screen: false, interactive: false, notes() {}, write() { wrote = true; } } as unknown as Terminal;
+  const s = createSplash(term, ["x"]);
+  s.set("x", "done");
+  await s.finish();
+  assert.equal(wrote, false);
 });
