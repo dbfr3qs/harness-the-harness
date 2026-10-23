@@ -234,3 +234,25 @@ test("unrecognized fence languages stay plain yellow", () => {
 test("recognized fence language still highlights", () => {
   assert.match(render('```python\nx = "hi"\n```'), /\x1b\[32m"hi"/);
 });
+
+const renderDim = (md: string) => { const s = createMarkdownStream({ dim: true }); return s.write(md) + s.flush(); };
+test("dim mode styles everything dim, no palette colors, markers gone", () => {
+  const out = renderDim("# H\n\n**b** `c`");
+  assert.ok(!out.includes("\x1b[1;36m") && !out.includes("\x1b[33m")); // no heading cyan / code yellow
+  assert.match(out, /\x1b\[2m/);                                       // dim present
+  const stripped = out.replace(/\x1b\[[0-9;]*m/g, "");
+  assert.ok(!stripped.includes("#") && !stripped.includes("**") && !stripped.includes("`")); // markers removed
+});
+test("dim mode still ends reset and is chunk-invariant", () => {
+  const whole = renderDim("a **b** c");
+  assert.equal(whole.match(/\x1b\[[0-9;]*m/g)!.at(-1), "\x1b[0m"); // last style is a reset (text may follow it)
+  for (let i = 0; i <= "a **b** c".length; i++) {
+    const s = createMarkdownStream({ dim: true });
+    assert.equal(s.write("a **b** c".slice(0, i)) + s.write("a **b** c".slice(i)) + s.flush(), whole);
+  }
+});
+test("dim mode does not syntax-highlight fenced code", () => {
+  const out = renderDim("```js\nconst x = 1;\n```");
+  assert.ok(!/\x1b\[(?!0m|2m)[0-9;]*m/.test(out));
+  assert.ok(out.includes("const x = 1;"));
+});

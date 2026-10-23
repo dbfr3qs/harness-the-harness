@@ -200,7 +200,13 @@ function classifyBlock(buf: string, complete: boolean): Start {
   return para;
 }
 
-export function createMarkdownStream(): MarkdownStream {
+export type MarkdownOptions = { dim?: boolean };
+
+// Dim mode: every non-reset SGR becomes DIM (fully emitted escapes only, so chunking is unaffected).
+const dimAll = (s: string): string => s.replace(/\x1b\[(?!0m)[0-9;]*m/g, DIM);
+
+export function createMarkdownStream(opts: MarkdownOptions = {}): MarkdownStream {
+  const dim = opts.dim === true;
   let mode: "start" | "inline" | "line" | "code" = "start";
   let indented = false; // current "line" is an indented code line
   let listCtx = false; // previous non-blank block was a list item (or its continuation)
@@ -229,7 +235,7 @@ export function createMarkdownStream(): MarkdownStream {
   };
 
   // No/unrecognized info string: plain code.
-  const codeLine = (l: string): string => (lang === "" || !isHighlightable(lang) ? CODE + l + RESET : highlightCodeLine(l, lang));
+  const codeLine = (l: string): string => (dim || lang === "" || !isHighlightable(lang) ? CODE + l + RESET : highlightCodeLine(l, lang));
 
   const finishLine = (): string => {
     const line = buf;
@@ -374,14 +380,14 @@ export function createMarkdownStream(): MarkdownStream {
   };
 
   return {
-    write: (delta) => feed(delta, false),
-    flush: () => feed("", true),
+    write: (delta) => (dim ? dimAll(feed(delta, false)) : feed(delta, false)),
+    flush: () => (dim ? dimAll(feed("", true)) : feed("", true)),
   };
 }
 
 /** Renders a complete Markdown string in one shot. */
-export function renderMarkdown(text: string): string {
-  const s = createMarkdownStream();
+export function renderMarkdown(text: string, opts: MarkdownOptions = {}): string {
+  const s = createMarkdownStream(opts);
   return s.write(text) + s.flush();
 }
 
@@ -392,9 +398,10 @@ export function renderMarkdown(text: string): string {
 export function createMarkdownSink(
   write: (s: string) => void,
   enabled: boolean,
+  opts: MarkdownOptions = {},
 ): { text(delta: string): void; flush(): void } {
   if (!enabled) return { text: (delta) => write(delta), flush() {} };
-  let stream = createMarkdownStream();
+  let stream = createMarkdownStream(opts);
   const emit = (s: string) => {
     if (s) write(s);
   };
@@ -402,7 +409,7 @@ export function createMarkdownSink(
     text: (delta) => emit(stream.write(delta)),
     flush() {
       emit(stream.flush());
-      stream = createMarkdownStream();
+      stream = createMarkdownStream(opts);
     },
   };
 }

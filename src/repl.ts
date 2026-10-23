@@ -232,7 +232,10 @@ async function main(): Promise<void> {
 
   const transcript = createTranscriptLogger(config.transcriptPath, { secrets: config.secrets });
 
-  // Thinking prints dimmed, after a "✻", with continuation lines indented to match.
+  // Thinking renders as dim Markdown after a "✻". Only one sink is active at a time: showThinking
+  // flushes the answer sink before thinking writes, and endThinking flushes the thinking sink
+  // (onTextDelta/say/onRequest/onResponse all call it) before answer text or anything else resumes.
+  const thinkSink = createMarkdownSink((s) => term.write(s), term.interactive, { dim: true });
   let inThinking = false;
   const showThinking = (text: string) => {
     mdSink.flush();
@@ -241,10 +244,11 @@ async function main(): Promise<void> {
       term.write(dim("✻ "));
       inThinking = true;
     }
-    term.write(dim(text.replace(/\n/g, "\n  ")));
+    thinkSink.text(text);
   };
   const endThinking = () => {
     if (!inThinking) return;
+    thinkSink.flush();
     inThinking = false;
     term.endLine();
   };
