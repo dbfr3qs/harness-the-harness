@@ -114,3 +114,14 @@ test("block-marker lookalikes stay literal and chunk-invariant", () => {
   assert.equal(render("-x"), "-x");
   assert.equal(render("+ p\n  - n"), "• p\n  • n");
 });
+test("heading text is inline-rendered", () => {
+  assert.equal(render("# a **b**"), "\x1b[1;36ma \x1b[1mb\x1b[0m");
+  assert.equal(render("# a **b** c"), "\x1b[1;36ma \x1b[1mb\x1b[0m\x1b[1;36m c\x1b[0m");
+  assert.equal(render("# use `x`"), "\x1b[1;36muse \x1b[33mx\x1b[0m");
+  assert.ok(!render("# use `x`").includes("`"));
+  assertChunkInvariant("# a **b** c");
+});
+test("an empty heading emits no empty styled span", () => {
+  assert.equal(render("# "), "");
+  assert.equal(render("a\n# \nb"), "a\n\nb");
+});

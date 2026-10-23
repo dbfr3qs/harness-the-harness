@@ -199,7 +199,14 @@ export function createMarkdownStream(): MarkdownStream {
     const h = /^\s*#{1,6} +(.*)$/.exec(line);
     if (h) {
       const text = h[1].replace(/(^|\s+)#+\s*$/, "").trim();
-      return sep("heading") + styled(HEADING, text);
+      if (text === "") {
+        if (started) pendingBlank = true;
+        return "";
+      }
+      // Inner resets re-open HEADING; drop the empty trailing HEADING+RESET pair.
+      const body = styled(HEADING, text);
+      const empty = HEADING + RESET;
+      return sep("heading") + (body.endsWith(empty) && body.length > empty.length * 2 ? body.slice(0, -empty.length) : body);
     }
     return sep("text") + renderInline(line);
   };
