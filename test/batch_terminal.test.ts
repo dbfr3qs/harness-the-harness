@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { createBatchTerminal } from "../src/terminal.ts";
+import { createBatchTerminal, createLineTerminal } from "../src/terminal.ts";
 
 test("lines() yields the prompt once, then ends", async () => {
   const term = createBatchTerminal("find the bug\nthen exploit it");
@@ -36,4 +36,18 @@ test("it is not the screen layout and takes no busy input", () => {
   assert.equal(term.screen, false);
   assert.equal(term.onBusyInput, undefined);
   assert.equal(term.inputText(), "");
+});
+
+test("batch terminal is not interactive", () => {
+  assert.equal(createBatchTerminal("p", () => {}).interactive, false);
+});
+
+test("the line terminal's interactive flag tracks tty (false under test: stdio is not a TTY)", () => {
+  // createLineTerminal reads process.stdin/stdout directly, so a positive TTY case isn't injectable here.
+  const term = createLineTerminal({ completion: () => ({ models: [], policyPatterns: [] }) });
+  try {
+    assert.equal(term.interactive, false);
+  } finally {
+    term.close(); // release the readline on stdin so the test process can exit
+  }
 });

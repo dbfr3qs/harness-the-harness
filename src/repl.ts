@@ -24,6 +24,7 @@ import type { Tool } from "./registry.ts";
 import { runDefaultsCommand } from "./defaults_command.ts";
 import { DEFAULT_SETTINGS_PATH, formatSettings, loadSettings } from "./settings.ts";
 import type { Settings } from "./settings.ts";
+import { createMarkdownSink, renderMarkdown } from "./markdown.ts";
 import { createScreen } from "./screen.ts";
 import { createBatchTerminal, createLineTerminal } from "./terminal.ts";
 import type { Terminal } from "./terminal.ts";
@@ -224,11 +225,15 @@ async function main(): Promise<void> {
         ? createScreen({ completion: () => completionState() })
         : createLineTerminal({ completion: () => completionState() });
 
+  // Model text renders as Markdown on an interactive terminal; elsewhere it passes through raw.
+  const mdSink = createMarkdownSink((s) => term.write(s), term.interactive);
+
   const transcript = createTranscriptLogger(config.transcriptPath, { secrets: config.secrets });
 
   // Thinking prints dimmed, after a "✻", with continuation lines indented to match.
   let inThinking = false;
   const showThinking = (text: string) => {
+    mdSink.flush();
     if (!inThinking) {
       term.endLine();
       term.write(dim("✻ "));
@@ -242,6 +247,7 @@ async function main(): Promise<void> {
     term.endLine();
   };
   const say = (line: string) => {
+    mdSink.flush();
     endThinking();
     term.endLine();
     term.write(`${line}\n`);
@@ -289,6 +295,7 @@ async function main(): Promise<void> {
 
   const clientHooks: ClientHooks = {
     onRequest: (body) => {
+      mdSink.flush();
       transcript.log("request", body);
       endThinking();
       term.endLine();
@@ -306,7 +313,7 @@ async function main(): Promise<void> {
     onTextDelta: (text) => {
       endThinking();
       activity("writing");
-      term.write(text);
+      mdSink.text(text);
       streamedChars += text.length;
       updateStatus();
     },
@@ -332,6 +339,7 @@ async function main(): Promise<void> {
   let model = createAnthropicClient(config, clientHooks);
   const hooks: AgentHooks = {
     onResponse: (res) => {
+      mdSink.flush();
       transcript.log("response", res);
       contextUsed = contextAfter(res);
       contextStale = undefined;
@@ -982,7 +990,7 @@ async function main(): Promise<void> {
         delivered.length = 0;
       }
       // When streaming, the text has already been printed as it arrived.
-      if (!config.stream && result.finalText && result.stopReason !== "interrupted") say(result.finalText);
+      if (!config.stream && result.finalText && result.stopReason !== "interrupted") say(term.interactive ? renderMarkdown(result.finalText) : result.finalText);
       const notice = stopNotice(result, config);
       if (notice) say(notice);
       const reading = await contextReading();

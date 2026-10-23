@@ -525,6 +525,7 @@ export function createScreen(opts: ScreenOptions): Terminal {
 
   const terminal: Terminal = {
     screen: true,
+    interactive: true,
     write(text) {
       if (text) draw(text);
     },

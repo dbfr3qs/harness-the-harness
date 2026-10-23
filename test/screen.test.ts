@@ -264,3 +264,8 @@ test("after a resize, the cursor position reply is used and never typed into the
   assert.equal(t.screen.inputText(), "draftx");
   t.screen.close();
 });
+
+test("the screen terminal is interactive", () => {
+  const t = fakeTerminal();
+  assert.equal(t.screen.interactive, true);
+});

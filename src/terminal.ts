@@ -13,6 +13,8 @@ import { createSpinner } from "./spinner.ts";
 export interface Terminal {
   /** True for the full-screen layout. */
   readonly screen: boolean;
+  /** True when output goes to a live terminal, so Markdown can be rendered as styled text. */
+  readonly interactive: boolean;
   /** Writes output; may be part of a line (streamed text). */
   write(text: string): void;
   /** Ends the current output line, if one is in progress. */
@@ -74,6 +76,7 @@ export function createBatchTerminal(prompt: string, out: (text: string) => void 
   }
   return {
     screen: false,
+    interactive: false,
     write,
     endLine,
     activity() {},
@@ -126,6 +129,7 @@ export function createLineTerminal(opts: TerminalOptions): Terminal {
 
   return {
     screen: false,
+    interactive: tty,
     write,
     endLine,
     activity(label) {
