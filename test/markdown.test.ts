@@ -38,6 +38,14 @@ test("the ambiguous tail is held until the span closes", () => {
 test("every emitted styled span is reset (no ANSI leak)", () => {
   assert.ok(render("`x`").endsWith("\x1b[0m"));
 });
+test("a backtick with no closer on its line is literal (no stall, no leak)", () => {
+  assert.equal(render("a `b\nc"), "a `b\nc");
+  assert.ok(!render("a `b\nc").includes("\x1b[33m"));
+  assert.equal(render("a `b\nc` d"), "a `b\nc` d");
+  assertChunkInvariant("a `b\nc` d");
+  const s = createMarkdownStream();
+  assert.equal(s.write("a `b\nc"), "a `b\nc"); // no stall past end of line
+});
 test("chunk-split invariance over text and code spans", () => {
   assertChunkInvariant("a `b c` d `e` f");
 });

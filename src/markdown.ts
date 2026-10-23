@@ -31,7 +31,14 @@ export function createMarkdownStream(): MarkdownStream {
       out += held.slice(0, open);
       held = held.slice(open);
       const close = held.indexOf("`", 1);
-      if (close === -1) return out; // span still open: hold the tail
+      const nl = held.indexOf("\n", 1);
+      if (nl !== -1 && (close === -1 || nl < close)) {
+        // A span never crosses a newline: the opening backtick is literal.
+        out += "`";
+        held = held.slice(1);
+        continue;
+      }
+      if (close === -1) return out; // span still open on this line: hold the tail
       const inner = held.slice(1, close);
       out += inner === "" ? "``" : CODE + inner + RESET;
       held = held.slice(close + 1);
