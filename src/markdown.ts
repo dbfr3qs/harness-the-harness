@@ -202,11 +202,40 @@ function classifyBlock(buf: string, complete: boolean): Start {
 
 export type MarkdownOptions = { dim?: boolean };
 
-// Dim mode: every non-reset SGR becomes DIM (fully emitted escapes only, so chunking is unaffected).
-const dimAll = (s: string): string => s.replace(/\x1b\[(?!0m)[0-9;]*m/g, DIM);
+// Dim mode: all printable text is dim. Stateful so chunking can't change the bytes: DIM opens at the
+// first printable char of a line, SGR escapes are dropped (already dim), RESET closes at each newline.
+function createDimmer(): { map(s: string): string; end(): string } {
+  let open = false;
+  return {
+    map(input) {
+      let out = "";
+      for (const part of input.split(/(\x1b\[[0-9;]*m|\n)/)) {
+        if (part === "") continue;
+        if (part === "\n") {
+          if (open) out += RESET;
+          open = false;
+          out += part;
+        } else if (part.startsWith("\x1b[")) {
+          continue;
+        } else {
+          if (!open) out += DIM;
+          open = true;
+          out += part;
+        }
+      }
+      return out;
+    },
+    end() {
+      const r = open ? RESET : "";
+      open = false;
+      return r;
+    },
+  };
+}
 
 export function createMarkdownStream(opts: MarkdownOptions = {}): MarkdownStream {
   const dim = opts.dim === true;
+  const dimmer = createDimmer();
   let mode: "start" | "inline" | "line" | "code" = "start";
   let indented = false; // current "line" is an indented code line
   let listCtx = false; // previous non-blank block was a list item (or its continuation)
@@ -380,8 +409,8 @@ export function createMarkdownStream(opts: MarkdownOptions = {}): MarkdownStream
   };
 
   return {
-    write: (delta) => (dim ? dimAll(feed(delta, false)) : feed(delta, false)),
-    flush: () => (dim ? dimAll(feed("", true)) : feed("", true)),
+    write: (delta) => (dim ? dimmer.map(feed(delta, false)) : feed(delta, false)),
+    flush: () => (dim ? dimmer.map(feed("", true)) + dimmer.end() : feed("", true)),
   };
 }
 

@@ -256,3 +256,22 @@ test("dim mode does not syntax-highlight fenced code", () => {
   assert.ok(!/\x1b\[(?!0m|2m)[0-9;]*m/.test(out));
   assert.ok(out.includes("const x = 1;"));
 });
+
+const unDimmed = (out: string) => out.replace(/\x1b\[2m[^\x1b]*?\x1b\[0m/g, "").replace(/\n/g, "");
+test("dim mode dims plain prose", () => {
+  const out = renderDim("plain words");
+  assert.ok(out.startsWith("\x1b[2m") && out.endsWith("\x1b[0m"));
+  assert.equal(unDimmed(out), "");
+});
+test("dim mode keeps text after a span dim", () => {
+  const out = renderDim("a **b** c");
+  assert.equal(unDimmed(out), "");
+  assert.ok(out.endsWith("\x1b[0m"));
+});
+test("dim mode dims mixed blocks and keeps separators clean", () => {
+  const out = renderDim("# H\n\npara\n\n- item");
+  assert.equal(unDimmed(out), "");
+  assert.ok(out.endsWith("\x1b[0m"));
+  assert.ok(!/\x1b\[2m\n/.test(out));
+  assert.ok(out.includes("\x1b[2mpara\x1b[0m") && out.includes("item"));
+});
