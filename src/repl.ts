@@ -955,7 +955,7 @@ async function main(): Promise<void> {
       text += `\n\n${restoreNote}`;
       restoreNote = undefined;
     }
-    if (term.interactive && userTurns++ > 0) say(turnRule(process.stdout.columns ?? 80));
+    if (term.interactive && !term.screen && userTurns++ > 0) say(turnRule(process.stdout.columns ?? 80));
     const undo = addUserText(messages, text);
     const lengthAfterInput = messages.length;
     const delivered: string[] = []; // messages typed during this run that reached the model

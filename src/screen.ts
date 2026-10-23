@@ -6,6 +6,7 @@ import type { Key, MenuItem, MenuState } from "./menu.ts";
 import { SPINNER_FRAMES } from "./spinner.ts";
 import type { Terminal, TerminalOptions } from "./terminal.ts";
 import { dimText } from "./terminal.ts";
+import { turnRule } from "./turn_marks.ts";
 
 // --- text measurement ------------------------------------------------------------------
 
@@ -110,6 +111,7 @@ export function createScreen(opts: ScreenOptions): Terminal {
   let frame = 0;
   let timer: ReturnType<typeof setInterval> | undefined;
   let interrupt: (() => void) | undefined;
+  let echoedPrompts = 0;
   const queue: string[] = [];
   let waiter: ((line: string | null) => void) | undefined;
   let ended = false;
@@ -283,7 +285,8 @@ export function createScreen(opts: ScreenOptions): Terminal {
       terminal.onBusyInput(text);
       return;
     }
-    draw(`${outCol > 0 ? "\n" : ""}\x1b[36m❯ \x1b[0m${text}\n`);
+    const rule = echoedPrompts++ > 0 ? `${turnRule(cols() - 1)}\n` : ""; // none above the session's first prompt
+    draw(`${outCol > 0 ? "\n" : ""}${rule}\x1b[36m❯ \x1b[0m${text}\n`);
     if (waiter) {
       const w = waiter;
       waiter = undefined;

@@ -62,6 +62,23 @@ test("Enter sends what was typed, and it's echoed above the input box", async ()
   t.screen.close();
 });
 
+test("a rule separates turns: none before the first prompt, one above each later prompt", async () => {
+  const t = fakeTerminal(40);
+  const lines = t.screen.lines()[Symbol.asyncIterator]();
+  const ruleThenPrompt = /(─+)\x1b\[0m\r?\n\x1b\[36m❯ \x1b\[0m(\w+)/g; // the panel border also uses ─, so match adjacency
+  await t.type("one\r");
+  await lines.next();
+  const afterFirst = t.raw();
+  assert.equal([...afterFirst.matchAll(ruleThenPrompt)].length, 0, "no rule above the first prompt");
+  await t.type("two\r");
+  await lines.next();
+  const hits = [...t.raw().slice(afterFirst.length).matchAll(ruleThenPrompt)];
+  assert.equal(hits.length, 1);
+  assert.equal(hits[0][2], "two");
+  assert.ok(hits[0][1].length > 0 && hits[0][1].length <= 39, "rule never reaches the last column");
+  t.screen.close();
+});
+
 test("while busy, a sent message goes to onBusyInput instead of lines()", async () => {
   const t = fakeTerminal();
   const got: string[] = [];
