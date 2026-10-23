@@ -281,7 +281,7 @@ export function createScreen(opts: ScreenOptions): Terminal {
       terminal.onBusyInput(text);
       return;
     }
-    draw(`${outCol > 0 ? "\n" : ""}\x1b[1m${PROMPT}\x1b[0m${text}\n`);
+    draw(`${outCol > 0 ? "\n" : ""}\x1b[36m❯ \x1b[0m${text}\n`);
     if (waiter) {
       const w = waiter;
       waiter = undefined;

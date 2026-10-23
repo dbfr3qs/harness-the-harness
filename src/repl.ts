@@ -48,6 +48,7 @@ import { formatDiff, formatInventory, libraryMenuItems, parseLibraryCommand } fr
 import type { CompiledPolicy } from "./tools/web_policy.ts";
 import type { AgentHooks } from "./agent.ts";
 import { addUserText } from "./history.ts";
+import { turnRule } from "./turn_marks.ts";
 import type { Message, ToolUseBlock } from "./types.ts";
 
 const SYSTEM_PROMPT =
@@ -748,6 +749,7 @@ async function main(): Promise<void> {
   };
 
   const lines = term.lines()[Symbol.asyncIterator]();
+  let userTurns = 0; // turns started from a user prompt; the first has nothing above it to separate from
   while (true) {
     let raw: string;
     if (autoSend.length) {
@@ -947,6 +949,7 @@ async function main(): Promise<void> {
       text += `\n\n${restoreNote}`;
       restoreNote = undefined;
     }
+    if (term.interactive && userTurns++ > 0) say(turnRule(process.stdout.columns ?? 80));
     const undo = addUserText(messages, text);
     const lengthAfterInput = messages.length;
     const delivered: string[] = []; // messages typed during this run that reached the model

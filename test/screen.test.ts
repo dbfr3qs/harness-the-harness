@@ -57,7 +57,8 @@ test("Enter sends what was typed, and it's echoed above the input box", async ()
   await t.type("\r");
   assert.deepEqual(await lines.next(), { done: false, value: "hello there" });
   assert.equal(t.screen.inputText(), "");
-  assert.match(t.output(), /> hello there\r\n/);
+  assert.match(t.output(), /❯ hello there\r\n/);
+  assert.ok(t.raw().includes("\x1b[36m❯ \x1b[0mhello there"), "cyan glyph, unstyled text");
   t.screen.close();
 });
 
