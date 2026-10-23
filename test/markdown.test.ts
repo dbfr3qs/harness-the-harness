@@ -165,7 +165,7 @@ test("a ~~~ line inside a ``` block stays content", () => {
   assert.equal(render("```\na\n~~~\nb\n```"), "\x1b[33ma\x1b[0m\n\x1b[33m~~~\x1b[0m\n\x1b[33mb\x1b[0m");
 });
 test("an indented fence under a list item opens a real fenced block", () => {
-  assert.equal(render("- step\n    ```bash\n    cmd\n    ```"), "• step\n\n\x1b[33mcmd\x1b[0m");
+  assert.equal(render("- step\n    ```bash\n    cmd\n    ```"), "• step\n\n\x1b[33m\x1b[35mcmd\x1b[0m"); // bash: command word highlighted
 });
 test("indented text under a list item is a continuation, not code", () => {
   assert.equal(render("- item\n    more"), "• item\nmore");
@@ -212,4 +212,17 @@ test("unterminated triple marker is literal, never stalls or leaks", () => {
 test("chunk-split invariance over triple markers", () => {
   assertChunkInvariant("a ***b*** c");
   assertChunkInvariant("a ___b___ c ***d\ne*** f");
+});
+
+test("fenced code is syntax-highlighted by its info string", () => {
+  const out = render("```python\nx = \"hi\" # c\n```");
+  assert.match(out, /\x1b\[32m"hi"/);
+  assert.match(out, /\x1b\[2m# c/);
+  assert.ok(out.replace(/\x1b\[[0-9;]*m/g, "").includes('x = "hi" # c'));
+});
+test("fenced code with no/unknown info string stays plain yellow", () => {
+  assert.equal(render("```\nplain\n```"), "\x1b[33mplain\x1b[0m");
+});
+test("highlighted fenced block is still chunk-invariant", () => {
+  assertChunkInvariant("text\n```js\nconst a = 1; // x\n```\nmore");
 });

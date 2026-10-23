@@ -1,5 +1,7 @@
 // Streaming Markdown -> ANSI renderer. Pure: no terminal access, timers, or globals.
 
+import { highlightCodeLine } from "./highlight.ts";
+
 export const RESET = "\x1b[0m";
 export const CODE = "\x1b[33m";
 export const BOLD = "\x1b[1m";
@@ -205,6 +207,7 @@ export function createMarkdownStream(): MarkdownStream {
   let dedent = 0; // indent stripped from the current line while in list context
   let fenceIndent = 0; // indent of the opening fence; stripped from content lines
   let fence = ""; // open fence marker (char repeated), while mode === "code"
+  let lang = ""; // info string (first word) of the open fence
   let buf = ""; // start: undecided line prefix; line: whole buffered line
   let held = ""; // inline: unresolved tail
   let prev: string | undefined;
@@ -225,6 +228,9 @@ export function createMarkdownStream(): MarkdownStream {
     return out;
   };
 
+  // No info string: plain code (nothing to pick a grammar from).
+  const codeLine = (l: string): string => (lang === "" ? CODE + l + RESET : highlightCodeLine(l, lang));
+
   const finishLine = (): string => {
     const line = buf;
     buf = "";
@@ -236,6 +242,7 @@ export function createMarkdownStream(): MarkdownStream {
     const f = /^\s*(?:(`{3,})[^`]*|(~{3,}).*)$/.exec(line);
     if (f) {
       fence = f[1] ?? f[2];
+      lang = /^\s*(?:`{3,}|~{3,})\s*(\S*)/.exec(line)![1];
       fenceIndent = dedent + /^ */.exec(line)![0].length;
       dedent = 0;
       mode = "code";
@@ -280,7 +287,7 @@ export function createMarkdownStream(): MarkdownStream {
         if (nl === -1) {
           const cl = /^\s*(`+|~+)\s*$/.exec(buf);
           const closes = cl !== null && cl[1][0] === fence[0] && cl[1].length >= fence.length;
-          if (final && buf !== "" && !closes) out += sep("code") + CODE + buf + RESET;
+          if (final && buf !== "" && !closes) out += sep("code") + codeLine(buf);
           break;
         }
         const line = buf;
@@ -291,7 +298,7 @@ export function createMarkdownStream(): MarkdownStream {
           pendingBlank = true;
         } else {
           const body = fenceIndent > 0 ? line.replace(new RegExp(`^ {0,${fenceIndent}}`), "") : line;
-          out += sep("code") + (body === "" ? "" : CODE + body + RESET);
+          out += sep("code") + (body === "" ? "" : codeLine(body));
         }
         data = data.slice(nl + 1);
       } else if (mode === "line") {
@@ -355,6 +362,7 @@ export function createMarkdownStream(): MarkdownStream {
       dedent = 0;
       fenceIndent = 0;
       fence = "";
+      lang = "";
       buf = "";
       held = "";
       prev = undefined;
