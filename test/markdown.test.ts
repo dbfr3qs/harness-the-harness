@@ -49,3 +49,34 @@ test("a backtick with no closer on its line is literal (no stall, no leak)", () 
 test("chunk-split invariance over text and code spans", () => {
   assertChunkInvariant("a `b c` d `e` f");
 });
+test("bold and italic are styled, markers removed", () => {
+  assert.equal(render("a **b** c *d* e"), "a \x1b[1mb\x1b[0m c \x1b[3md\x1b[0m e");
+  assert.equal(render("__x__ _y_"), "\x1b[1mx\x1b[0m \x1b[3my\x1b[0m");
+});
+test("a standalone asterisk stays literal", () => {
+  assert.equal(render("2 * 3 = 6"), "2 * 3 = 6");
+});
+test("a link shows styled text then a dim URL", () => {
+  assert.equal(render("see [docs](http://x)"), "see \x1b[4mdocs\x1b[0m \x1b[2m(http://x)\x1b[0m");
+});
+test("unterminated emphasis flushes literally", () => {
+  assert.equal(render("**oops"), "**oops");
+  assert.equal(render("[text"), "[text");
+});
+test("chunk-split invariance over emphasis and links", () => {
+  assertChunkInvariant("x **b** y [t](http://z) *i* `c`");
+});
+test("unclosed emphasis/link markers never stall or leak past a newline", () => {
+  for (const md of ["a **b\nc", "a *b\nc *d", "a _b\nc", "a [b\nc](u)", "a [b](u\nc)"]) {
+    assert.equal(render(md), md);
+    assertChunkInvariant(md);
+  }
+  const s = createMarkdownStream();
+  assert.equal(s.write("a **b\nc"), "a **b\nc");
+  assert.equal(s.write("x [y\nz"), "x [y\nz");
+});
+test("snake_case underscores stay literal; inline code nests in bold", () => {
+  assert.equal(render("snake_case_name"), "snake_case_name");
+  assert.equal(render("**a `c` b**"), "\x1b[1ma \x1b[33mc\x1b[0m\x1b[1m b\x1b[0m");
+  assertChunkInvariant("snake_case **a `c` b** _x_ [**t**](u)");
+});
