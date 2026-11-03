@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { ConfigError, loadConfig } from "../src/config.ts";
+import { ConfigError, loadConfig, isProvider, providerSettings, checkModel } from "../src/config.ts";
 
 const A = "sk-ant-test-AAAA";
 const D = "sk-test-DDDD";
@@ -31,7 +31,7 @@ test("a missing key names the variable for the chosen provider", () => {
 });
 
 test("an unknown provider, or a model DeepSeek would silently remap, is a config error", () => {
-  assert.throws(() => loadConfig({ PROVIDER: "openai", ANTHROPIC_API_KEY: A }), /PROVIDER must be one of anthropic, deepseek \(got "openai"\)/);
+  assert.throws(() => loadConfig({ PROVIDER: "openai", ANTHROPIC_API_KEY: A }), /PROVIDER must be one of anthropic, deepseek, gemini \(got "openai"\)/);
   for (const MODEL of ["claude-opus-5-5", "deepseek-chat", "deepseek-flsh"]) {
     assert.throws(
       () => loadConfig({ PROVIDER: "deepseek", DEEPSEEK_API_KEY: D, MODEL }),
@@ -77,4 +77,18 @@ test("the MCP config defaults to mcp.json and is required only when MCP_CONFIG n
   const named = loadConfig({ ANTHROPIC_API_KEY: A, MCP_CONFIG: "/etc/harness/mcp.json" });
   assert.equal(named.mcpConfigPath, "/etc/harness/mcp.json");
   assert.equal(named.mcpConfigRequired, true);
+});
+
+test("gemini is a provider keyed by GEMINI_API_KEY", () => {
+  assert.ok(isProvider("gemini"));
+  const s = providerSettings({ GEMINI_API_KEY: "k" } as any, "gemini", undefined, {});
+  assert.equal(s.provider, "gemini");
+  assert.equal(s.apiKey, "k");
+  assert.equal(s.baseUrl, "https://generativelanguage.googleapis.com");
+  assert.equal(s.model, "gemini-3.1-pro-preview");
+});
+
+test("gemini rejects an unknown model (strict)", () => {
+  assert.throws(() => checkModel("gemini" as any, "gpt-5"));
+  assert.doesNotThrow(() => checkModel("gemini" as any, "gemini-3.5-flash-lite"));
 });
