@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AssistantBlock, MessageResponse, StopReason } from "../types.ts";
+import type { AssistantBlock, JsonSchema, Message, MessageResponse, ModelRequest, StopReason } from "../types.ts";
 
 // Gemini wire types (generateContent / streamGenerateContent).
 export interface GeminiFunctionCall {
@@ -168,4 +168,79 @@ export function createGeminiStreamAccumulator(model = "", id = ""): GeminiStream
       };
     },
   };
+}
+
+// Gemini accepts an OpenAPI-subset schema; keep only the keys it understands.
+export function toGeminiSchema(s: JsonSchema): object {
+  const out: Record<string, unknown> = { type: s.type };
+  if (s.description !== undefined) out.description = s.description;
+  if (s.enum !== undefined) out.enum = s.enum;
+  if (s.required !== undefined) out.required = s.required;
+  if (s.properties) {
+    out.properties = Object.fromEntries(Object.entries(s.properties).map(([k, v]) => [k, toGeminiSchema(v)]));
+  }
+  if (s.items) out.items = toGeminiSchema(s.items);
+  return out;
+}
+
+function contentsOf(messages: Message[]): GeminiContent[] {
+  const names = new Map<string, string>(); // tool_use id -> name, from prior assistant turns
+  const contents: GeminiContent[] = [];
+  for (const m of messages) {
+    if (m.role === "assistant") {
+      const sigs = new Map<string, string>();
+      for (const b of m.content) {
+        const c = b as GeminiSignatureBlock;
+        if (b.type === "thinking" && c.toolUseId && c.thoughtSignature) sigs.set(c.toolUseId, c.thoughtSignature);
+      }
+      const parts: GeminiPart[] = [];
+      for (const b of m.content) {
+        if (b.type === "text") {
+          const t = (b as { text: string }).text;
+          if (t) parts.push({ text: t });
+        } else if (b.type === "tool_use") {
+          const tu = b as { id: string; name: string; input: unknown };
+          names.set(tu.id, tu.name);
+          const sig = sigs.get(tu.id);
+          parts.push({ functionCall: { id: tu.id, name: tu.name, args: tu.input }, ...(sig ? { thoughtSignature: sig } : {}) });
+        } else if (b.type === "thinking") {
+          const c = b as GeminiSignatureBlock;
+          if (c.toolUseId) continue; // companion: consumed by its functionCall
+          if (c.thinking) {
+            parts.push({ text: c.thinking, thought: true, ...(c.thoughtSignature ? { thoughtSignature: c.thoughtSignature } : {}) });
+          }
+        }
+      }
+      if (parts.length) contents.push({ role: "model", parts });
+    } else if (typeof m.content === "string") {
+      if (m.content) contents.push({ role: "user", parts: [{ text: m.content }] });
+    } else {
+      const parts: GeminiPart[] = [];
+      for (const b of m.content) {
+        if (b.type === "tool_result") {
+          parts.push({ functionResponse: {
+            id: b.tool_use_id,
+            name: names.get(b.tool_use_id) ?? "unknown",
+            response: b.is_error ? { error: b.content } : { result: b.content },
+          } });
+        } else if (b.text) {
+          parts.push({ text: b.text });
+        }
+      }
+      if (parts.length) contents.push({ role: "user", parts });
+    }
+  }
+  return contents;
+}
+
+export function buildGeminiRequest(req: ModelRequest, maxTokens: number, includeThoughts: boolean): { body: object } {
+  const body: Record<string, unknown> = {
+    contents: contentsOf(req.messages),
+    generationConfig: { maxOutputTokens: maxTokens, ...(includeThoughts ? { thinkingConfig: { includeThoughts: true } } : {}) },
+  };
+  if (req.system) body.systemInstruction = { parts: [{ text: req.system }] };
+  if (req.tools.length) {
+    body.tools = [{ functionDeclarations: req.tools.map((t) => ({ name: t.name, description: t.description, parameters: toGeminiSchema(t.input_schema) })) }];
+  }
+  return { body };
 }
