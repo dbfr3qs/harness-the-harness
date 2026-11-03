@@ -30,6 +30,22 @@ function errorDetail(text: string): string {
   return snippet ? ` ${snippet}` : "";
 }
 
+// RetryInfo.retryDelay ("37s") from a Gemini error body, in ms.
+function retryDelayMs(text: string): number | undefined {
+  try {
+    const details = (JSON.parse(text) as { error?: { details?: unknown } })?.error?.details;
+    if (!Array.isArray(details)) return undefined;
+    for (const d of details) {
+      const v = (d as { retryDelay?: unknown } | null)?.retryDelay;
+      const m = typeof v === "string" ? /^(\d+(?:\.\d+)?)s$/.exec(v) : null;
+      if (m) return Math.round(Number(m[1]) * 1000);
+    }
+  } catch {
+    // no usable body
+  }
+  return undefined;
+}
+
 export function createGeminiClient(config: ClientConfig, hooks: ClientHooks = {}, deps: ClientDeps = {}): ModelFn {
   const doFetch = deps.fetch ?? fetch;
   const sleep = deps.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
@@ -76,7 +92,7 @@ export function createGeminiClient(config: ClientConfig, hooks: ClientHooks = {}
         }
         const detail = `HTTP ${res.status}${errorDetail(text)}`;
         if (retryableStatus(res.status)) {
-          return { kind: "retry", reason: detail, retryAfterMs: parseRetryAfter(res.headers.get("retry-after")) };
+          return { kind: "retry", reason: detail, retryAfterMs: parseRetryAfter(res.headers.get("retry-after")) ?? retryDelayMs(text) };
         }
         const hint = res.status === 401 || res.status === 403 || /api key/i.test(text) ? ` (check ${keyVar})` : "";
         throw new Error(`${label} API error: ${detail}${hint}`);
@@ -116,6 +132,7 @@ export function createGeminiClient(config: ClientConfig, hooks: ClientHooks = {}
     const timing = Boolean(hooks.onFirstToken || hooks.onStreamDone);
     let inputTokens = 0;
     let firstAt: number | undefined;
+    let sawFinish = false;
     const failed = (reason: string): Attempt => {
       if (shown.value) throw new FatalStreamError(`${label} API stream failed after output began: ${reason}`);
       return { kind: "retry", reason };
@@ -135,7 +152,8 @@ export function createGeminiClient(config: ClientConfig, hooks: ClientHooks = {}
           if (retryableStatus(code)) return failed(`stream error ${msg}`);
           throw new FatalStreamError(`${label} API error in stream: ${msg}`);
         }
-        if (timing && ev.usageMetadata?.promptTokenCount !== undefined) inputTokens = ev.usageMetadata.promptTokenCount;
+        if (timing && ev.usageMetadata?.promptTokenCount !== undefined) inputTokens = ev.usageMetadata.promptTokenCount - (ev.usageMetadata.cachedContentTokenCount ?? 0);
+        if (ev.candidates?.[0]?.finishReason) sawFinish = true;
         const out = acc.push(ev);
         const thinking = config.showThinking && hooks.onThinkingDelta ? out.thinkingDelta : undefined;
         if (timing && firstAt === undefined && (out.textDelta || out.thinkingDelta)) {
@@ -156,6 +174,8 @@ export function createGeminiClient(config: ClientConfig, hooks: ClientHooks = {}
       if (err instanceof FatalStreamError) throw new Error(err.message);
       return failed(describeNetworkError(err, config.timeoutMs));
     }
+
+    if (!sawFinish) return failed("stream ended before a finishReason");
 
     const response = acc.finish();
     if (firstAt !== undefined && hooks.onStreamDone) {

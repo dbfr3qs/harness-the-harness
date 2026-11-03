@@ -142,3 +142,17 @@ test("without a terminal, the commands print a list and how to switch", async ()
   assert.match(models, /^Anthropic models:\n  \* claude-sonnet-5-5  \(default · current\)\n/);
   assert.match(models, /\nUse \/model <id> \(any Anthropic model ID works\) to switch\.$/);
 });
+
+test("a gemini /model switch strips thinking so foreign signatures are not replayed", async () => {
+  const messages = conversation();
+  const t = ctx({ ...both, GEMINI_API_KEY: "g", PROVIDER: "gemini" }, [], messages);
+  const r = await t.model("gemini-3.8-flash");
+  assert.match(r.output, /thinking block\(s\) removed/);
+  assert.equal(removeThinking(messages), 0);
+});
+test("an anthropic /model switch keeps thinking", async () => {
+  const messages = conversation();
+  const t = ctx(both, [], messages);
+  await t.model("claude-opus-5-5");
+  assert.equal(removeThinking(messages), 2);
+});

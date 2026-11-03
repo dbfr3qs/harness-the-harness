@@ -91,3 +91,17 @@ test("interleaved text/thought/text stays ordered and separate", () => {
     { type: "text", text: "b" },
   ]);
 });
+
+test("promptFeedback.blockReason, or a non-STOP finish with no content, is a refusal", () => {
+  assert.equal(parseGeminiResponse({ promptFeedback: { blockReason: "SAFETY" } } as any, "m", "i").stop_reason, "refusal");
+  for (const r of ["PROHIBITED_CONTENT", "RECITATION", "MALFORMED_FUNCTION_CALL"]) {
+    assert.equal(parseGeminiResponse({ candidates: [{ finishReason: r }] }, "m", "i").stop_reason, "refusal", r);
+  }
+  assert.equal(parseGeminiResponse({ candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }] }, "m", "i").stop_reason, "end_turn");
+  const acc = createGeminiStreamAccumulator("m", "i");
+  acc.push({ promptFeedback: { blockReason: "OTHER" } } as any);
+  assert.equal(acc.finish().stop_reason, "refusal");
+  const acc2 = createGeminiStreamAccumulator("m", "i");
+  acc2.push({ candidates: [{ finishReason: "RECITATION" }] });
+  assert.equal(acc2.finish().stop_reason, "refusal");
+});

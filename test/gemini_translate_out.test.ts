@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildGeminiRequest, toGeminiSchema } from "../src/gemini/translate.ts";
+import { buildGeminiRequest } from "../src/gemini/translate.ts";
 
 test("system, tools, and a plain user message translate", () => {
   const { body } = buildGeminiRequest({ system: "S", messages: [{ role: "user", content: "hi" }], tools: [{ name: "run", description: "d", input_schema: { type: "object", properties: { x: { type: "string" } }, required: ["x"] } }] }, 1024, true);
@@ -49,12 +49,8 @@ test("parallel same-name calls stay disambiguated by id", () => {
   assert.ok(resp.some((p: any) => p.functionResponse.id === "a" && p.functionResponse.response.result === "RA"));
   assert.ok(resp.some((p: any) => p.functionResponse.id === "b" && p.functionResponse.response.result === "RB"));
 });
-test("toGeminiSchema recurses through nested object/array/enum", () => {
-  const g = toGeminiSchema({ type: "object", properties: { items: { type: "array", items: { type: "object", properties: { k: { type: "string", enum: ["a", "b"] } } } } } }) as any;
-  assert.equal(g.type, "object");
-  assert.equal(g.properties.items.items.properties.k.enum[0], "a");
-});
-test("toGeminiSchema drops unsupported keys", () => {
-  const g = toGeminiSchema({ type: "object", additionalProperties: false, $schema: "x", properties: { a: { type: "string", default: "z" } } } as any) as any;
-  assert.deepEqual(g, { type: "object", properties: { a: { type: "string" } } });
+test("tool schemas are sent raw via parametersJsonSchema", () => {
+  const schema = { type: ["object", "null"], additionalProperties: false, properties: { n: { type: "integer", enum: [1, 2] }, e: {} } } as any;
+  const { body } = buildGeminiRequest({ system: "", messages: [{ role: "user", content: "hi" }], tools: [{ name: "run", description: "d", input_schema: schema }] }, 64, false);
+  assert.deepEqual((body as any).tools, [{ functionDeclarations: [{ name: "run", description: "d", parametersJsonSchema: schema }] }]);
 });

@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { AssistantBlock, JsonSchema, Message, MessageResponse, ModelRequest, StopReason } from "../types.ts";
+import type { AssistantBlock, Message, MessageResponse, ModelRequest, StopReason } from "../types.ts";
 
 // Gemini wire types (generateContent / streamGenerateContent).
 export interface GeminiFunctionCall {
@@ -42,6 +42,7 @@ export interface GeminiCandidate {
 
 export interface GeminiResponse {
   candidates?: GeminiCandidate[];
+  promptFeedback?: { blockReason?: string };
   usageMetadata?: GeminiUsageMetadata;
 }
 
@@ -54,8 +55,10 @@ export type GeminiSignatureBlock = {
   toolUseId?: string;
 };
 
-function stopReason(finish: string | undefined, hasCall: boolean): StopReason {
+function stopReason(finish: string | undefined, hasCall: boolean, hasContent: boolean, blocked: boolean): StopReason {
   if (hasCall) return "tool_use";
+  if (blocked) return "refusal";
+  if (finish && finish !== "STOP" && finish !== "MAX_TOKENS" && !hasContent) return "refusal";
   switch (finish) {
     case "MAX_TOKENS": return "max_tokens";
     case "SAFETY": return "refusal";
@@ -111,7 +114,7 @@ export function parseGeminiResponse(res: GeminiResponse, model: string, id: stri
     model,
     role: "assistant",
     content: blocks,
-    stop_reason: stopReason(cand?.finishReason, hasCall),
+    stop_reason: stopReason(cand?.finishReason, hasCall, blocks.length > 0, Boolean(res.promptFeedback?.blockReason)),
     usage: usageOf(res.usageMetadata),
   };
 }
@@ -125,8 +128,10 @@ export function createGeminiStreamAccumulator(model = "", id = ""): GeminiStream
   const parts: GeminiPart[] = [];
   let finishReason: string | undefined;
   let usage: GeminiUsageMetadata | undefined;
+  let blocked = false;
   return {
     push(chunk) {
+      if (chunk.promptFeedback?.blockReason) blocked = true;
       if (chunk.usageMetadata) usage = chunk.usageMetadata;
       const cand = chunk.candidates?.[0];
       if (cand?.finishReason) finishReason = cand.finishReason;
@@ -163,24 +168,11 @@ export function createGeminiStreamAccumulator(model = "", id = ""): GeminiStream
         model,
         role: "assistant",
         content: blocks,
-        stop_reason: stopReason(finishReason, hasCall),
+        stop_reason: stopReason(finishReason, hasCall, blocks.length > 0, blocked),
         usage: usageOf(usage),
       };
     },
   };
-}
-
-// Gemini accepts an OpenAPI-subset schema; keep only the keys it understands.
-export function toGeminiSchema(s: JsonSchema): object {
-  const out: Record<string, unknown> = { type: s.type };
-  if (s.description !== undefined) out.description = s.description;
-  if (s.enum !== undefined) out.enum = s.enum;
-  if (s.required !== undefined) out.required = s.required;
-  if (s.properties) {
-    out.properties = Object.fromEntries(Object.entries(s.properties).map(([k, v]) => [k, toGeminiSchema(v)]));
-  }
-  if (s.items) out.items = toGeminiSchema(s.items);
-  return out;
 }
 
 function contentsOf(messages: Message[]): GeminiContent[] {
@@ -240,7 +232,7 @@ export function buildGeminiRequest(req: ModelRequest, maxTokens: number, include
   };
   if (req.system) body.systemInstruction = { parts: [{ text: req.system }] };
   if (req.tools.length) {
-    body.tools = [{ functionDeclarations: req.tools.map((t) => ({ name: t.name, description: t.description, parameters: toGeminiSchema(t.input_schema) })) }];
+    body.tools = [{ functionDeclarations: req.tools.map((t) => ({ name: t.name, description: t.description, parametersJsonSchema: t.input_schema })) }];
   }
   return { body };
 }

@@ -155,3 +155,38 @@ test("an in-stream error event after output is surfaced once, cleanly", async ()
   });
   assert.equal(calls, 1);
 });
+
+test("a 429 retryDelay in the body is used when there is no Retry-After header", async () => {
+  const body = { error: { code: 429, status: "RESOURCE_EXHAUSTED", message: "slow", details: [{ "@type": "type.googleapis.com/google.rpc.RetryInfo", retryDelay: "37s" }] } };
+  const seq = [json(body, 429), json(okBody)];
+  const sleeps: number[] = [];
+  const client = createGeminiClient({ ...cfg, maxRetries: 1 }, {}, {
+    fetch: (async () => seq.shift()!) as any,
+    sleep: async (ms) => void sleeps.push(ms),
+  });
+  await client(req);
+  assert.deepEqual(sleeps, [37000]);
+});
+
+test("a stream with no finishReason retries when nothing was shown, and is fatal after output", async () => {
+  const scfg = { ...cfg, stream: true, maxRetries: 1 };
+  const chunk = { candidates: [{ content: { parts: [{ text: "partial" }] } }] };
+  // nothing shown (empty-part chunk) -> retry, then success
+  const seq = [sse({ candidates: [{ content: { parts: [] } }] }), sse({ candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }] })];
+  const retries: any[] = [];
+  const c1 = createGeminiClient(scfg, { onRetry: (i) => retries.push(i) }, { fetch: (async () => seq.shift()!) as any, sleep: async () => {} });
+  assert.equal((await c1(req)).content[0].type, "text");
+  assert.match(retries[0].reason, /before a finishReason/);
+  // output shown -> fatal
+  const c2 = createGeminiClient(scfg, { onTextDelta: () => {} }, { fetch: (async () => sse(chunk)) as any, sleep: async () => {} });
+  await assert.rejects(c2(req), /after output began: stream ended before a finishReason/);
+});
+
+test("onFirstToken.inputTokens excludes cached tokens", async () => {
+  let got: any;
+  const c = createGeminiClient({ ...cfg, stream: true }, { onFirstToken: (i) => (got = i) }, {
+    fetch: (async () => sse({ candidates: [{ content: { parts: [{ text: "a" }] }, finishReason: "STOP" }], usageMetadata: { promptTokenCount: 10, cachedContentTokenCount: 4 } })) as any,
+  });
+  await c(req);
+  assert.equal(got.inputTokens, 6);
+});
