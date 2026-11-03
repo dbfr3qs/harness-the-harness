@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { readSkill, scanSkillsDir } from "../src/library/skills.ts";
+import { readSkill, scanSkillsDir, scanSkillsDirSync } from "../src/library/skills.ts";
 
 let dir: string;
 before(async () => {
@@ -34,4 +34,9 @@ test("scanSkillsDir on a missing dir is empty", async () => {
 test("readSkill returns text; unknown name throws instructively", async () => {
   assert.match(await readSkill(dir, "alpha"), /Do the alpha thing/);
   await assert.rejects(readSkill(dir, "ghost"), /ghost.*SKILL\.md/s);
+});
+
+test("scanSkillsDirSync finds the same skills as scanSkillsDir, and a missing dir is empty", async () => {
+  assert.deepEqual(scanSkillsDirSync(dir), await scanSkillsDir(dir));
+  assert.deepEqual(scanSkillsDirSync(join(dir, "nope")), []);
 });

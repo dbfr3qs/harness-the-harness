@@ -15,12 +15,21 @@ interface Calls {
   addDescriptions: (string | undefined)[];
   setEnabled: { kind: ArtifactKind; name: string; enabled: boolean }[];
   readSkill: string[];
+  reloadSkills: number;
 }
 
 function fakeSession(overrides: Partial<LibrarySession> = {}): { session: LibrarySession; calls: Calls } {
-  const calls: Calls = { reloadTools: 0, addServer: [], addDescriptions: [], setEnabled: [], readSkill: [] };
+  const calls: Calls = { reloadTools: 0, addServer: [], addDescriptions: [], setEnabled: [], readSkill: [], reloadSkills: 0 };
   const base: LibrarySession = {
     toolsDir: "/home/u/.harness/library/tools",
+    skillsDir: "/home/u/.harness/library/skills",
+    async reloadSkills() {
+      calls.reloadSkills++;
+      return { added: [], updated: [], removed: [] };
+    },
+    reloadSkillsSync() {
+      return { added: [], updated: [], removed: [] };
+    },
     async reloadTools() {
       calls.reloadTools++;
       return { loaded: ["alpha", "beta"], failed: [] };
@@ -191,4 +200,47 @@ test("reload_tools names the tools directory and steers the model to run_shell, 
   assert.ok(!/with write_file/.test(tool.description), "does not tell the model to author with write_file");
   const out = await tool.handler({}, ctx);
   assert.ok(String(out).includes("/home/u/.harness/library/tools"));
+});
+
+test("list_catalog rescans the skills directory before listing, so a just-written skill shows up", async () => {
+  let scanned = false;
+  const { session, calls } = fakeSession({
+    inventory: () => (scanned ? [{ kind: "skill", name: "fresh", enabled: true, persisted: false, description: "new how-to" }] : []),
+  });
+  session.reloadSkills = async () => {
+    calls.reloadSkills++;
+    scanned = true;
+    return { added: ["fresh"], updated: [], removed: [] };
+  };
+  const out = await find(session, "list_catalog").handler({}, ctx);
+  assert.equal(calls.reloadSkills, 1);
+  assert.match(out, /skill fresh: new how-to/);
+});
+
+test("list_catalog still lists when the skills rescan fails, and says so", async () => {
+  const { session } = fakeSession({
+    inventory: () => [{ kind: "tool", name: "t", enabled: true, persisted: true }],
+    reloadSkills: async () => {
+      throw new Error("EACCES: permission denied");
+    },
+  });
+  const out = await find(session, "list_catalog").handler({}, ctx);
+  assert.match(out, /tool t \[loaded\]/);
+  assert.match(out, /could not rescan.*EACCES/s);
+});
+
+test("use_skill rescans before reading, so a skill written this session joins the catalog", async () => {
+  const { session, calls } = fakeSession();
+  await find(session, "use_skill").handler({ name: "writing" }, ctx);
+  assert.equal(calls.reloadSkills, 1);
+  assert.deepEqual(calls.readSkill, ["writing"]);
+});
+
+test("the skill tools tell the model where and how to write a skill", () => {
+  const { session } = fakeSession();
+  for (const name of ["list_catalog", "use_skill"]) {
+    const d = find(session, name).description;
+    assert.ok(d.includes("/home/u/.harness/library/skills"), `${name} names the skills directory`);
+    assert.match(d, /SKILL\.md/);
+  }
 });

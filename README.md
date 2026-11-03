@@ -1,9 +1,24 @@
 # harness
 
-A zero-dependency TypeScript CLI that chats with a model through the Anthropic Messages API and lets it call tools in a loop until it gives a final answer. It works with Claude (Anthropic) or with DeepSeek through DeepSeek's Anthropic-compatible endpoint; see [Providers](#providers).
+A zero-dependency TypeScript CLI that chats with a model and lets it call tools in a loop until it gives a final answer. It works with Claude (Anthropic), DeepSeek (through its Anthropic-compatible endpoint) and Google Gemini (through Gemini's native API, translated to and from the harness's message format), and you can switch between them mid-conversation; see [Providers](#providers).
 
 - No runtime dependencies: plain `fetch`, `node:readline/promises`, `node:fs/promises`, `node:test`.
 - Runs `.ts` files directly on Node 24 or later (type stripping); `tsc` is used only for type-checking.
+
+## A harness that extends itself
+
+In [unattended mode](#unattended-mode) the harness can change itself while it works. When the model finds it is missing a capability, it doesn't have to give up or work around the gap; it can build or fetch what it needs and start using it in the same session:
+
+- **New tools.** The model writes a TypeScript tool file into its library with `run_shell`, calls `reload_tools`, and the tool joins the live tool set straight away. If the file fails to load, `reload_tools` says why, so the model can fix it and try again.
+- **MCP integrations.** `add_mcp_server` installs and starts an MCP server (for example a decompiler or browser-automation server from npm), and its tools become available as `<server>__<tool>`. The model is told to prefer a reputable existing server over writing its own for anything substantial.
+- **Skills.** A skill is a written how-to (`skills/<name>/SKILL.md`). The model reads one with `use_skill` before a task it covers, and it can write new ones with `run_shell` to record a procedure it worked out. Skills hot-reload: a new or edited `SKILL.md` is picked up automatically the next time the catalog is read, with no reload step and no effect on the prompt cache.
+- **A catalog, not a pile.** Everything the model builds goes into a library outside the workspace (`~/.harness/library` by default). Installed items cost no context until they're loaded: `list_catalog` shows what exists, and `set_artifact_enabled` loads or unloads a tool, skill or server, so a long run doesn't carry every tool it has ever built.
+
+This is what makes long, unattended runs workable. An agent in a sandbox working on something open-ended, such as reverse engineering a binary, can write a small parser tool when it needs one, start a Ghidra MCP server when it reaches native code, and save the method it settled on as a skill for later.
+
+**You decide what stays.** All of it lasts only for the session. Nothing the model adds is written to the library's `manifest.json` unless you run `/library persist`, which lists the new items and asks before saving. The model has no tool that persists anything. If you quit with unpersisted additions, the harness warns you that they will be gone next session. Persisted items come back in later sessions *dormant*, in the catalog but not loaded, until the model or you (`/tools`, `/skills`, `/mcp`) turn them on.
+
+None of this exists in the normal, interactive harness. There the model has only read-only tools, and `test/boundaries.test.ts` checks that it stays that way. Self-extension runs code with the harness's full permissions, which is why it's limited to unattended mode, and that mode belongs in a sandbox. The details are in [Extending the harness at runtime](#extending-the-harness-at-runtime).
 
 ## Setup
 
@@ -18,7 +33,10 @@ A zero-dependency TypeScript CLI that chats with a model through the Anthropic M
    ```sh
    ANTHROPIC_API_KEY=sk-ant-...
    DEEPSEEK_API_KEY=sk-...        # only needed for PROVIDER=deepseek
+   GEMINI_API_KEY=...             # only needed for PROVIDER=gemini (a Google AI Studio key)
    ```
+
+   You only need the key for the provider you use. `/provider` lists every provider, and shows the ones without a key greyed out.
 
    `npm start` loads `.env` automatically if it exists. You can also export the variables in your shell instead. Keys are never printed, logged, written to a transcript or included in an error message, and `read_file` refuses to open `.env`.
 
@@ -67,7 +85,7 @@ The screen needs a terminal for both input and output. With piped input or outpu
 | `/reset`   | Clear conversation history |
 | `/history` | Show message count, roles and block types |
 | `/policy`  | View or change the `web_fetch` site policy (see [Changing the policy from the REPL](#changing-the-policy-from-the-repl)) |
-| `/provider` | Switch between Claude and DeepSeek from a menu; `/provider deepseek` switches directly (see [Providers](#providers)) |
+| `/provider` | Switch between Claude, DeepSeek and Gemini from a menu; `/provider gemini` switches directly (see [Providers](#providers)) |
 | `/model`   | Switch model within the current provider from a menu; `/model <id>` switches directly |
 | `/turns`   | Show the model-call limit per message; `/turns <n>` or `/turns unlimited` changes it for the session |
 | `/context` | Show how full the context window is (see [Context meter](#context-meter)) |
@@ -83,7 +101,7 @@ Each tool call is shown as a dim line as it runs (`→ read_file src/agent.ts`),
 
 After each answer the REPL prints that exchange's token totals, the number of model calls and the number of tool calls, e.g. `[tokens: 9413 in + 42240 cached, 5951 out · 8 model call(s) · 19 tool call(s)]`. "Cached" is input the provider served from its prompt cache (DeepSeek caches automatically); it is still input the model read, just billed at a lower rate. If the loop stops early, it says why: `MAX_TURNS` reached while the model was still calling tools, the max tokens cut-off, or a refusal. After `MAX_TURNS`, send another message and the model continues where it left off; `/turns <n>` raises the limit first if it needs more room.
 
-**Max tokens** (`max_tokens`, default 4,096) is the most the model may write in one response, and its thinking counts toward it, so models that think by default (DeepSeek, Claude 5) can reach it sooner than the visible answer suggests. When a response is cut off, raise it with `/maxtokens <n>` (`16000`, `16,000` or `16k`) and send "continue". The harness knows each model's ceiling (from Anthropic's models API, or DeepSeek's published 384K) and refuses values above it; if `MAX_TOKENS` or a saved value is above the current model's ceiling, it's lowered to the ceiling, with a note.
+**Max tokens** (`max_tokens`, default 4,096) is the most the model may write in one response, and its thinking counts toward it, so models that think by default (DeepSeek, Claude 5) can reach it sooner than the visible answer suggests. When a response is cut off, raise it with `/maxtokens <n>` (`16000`, `16,000` or `16k`) and send "continue". The harness knows each model's ceiling (from Anthropic's models API, DeepSeek's published 384K, or Gemini's published 65,536) and refuses values above it; if `MAX_TOKENS` or a saved value is above the current model's ceiling, it's lowered to the ceiling, with a note.
 
 ### Context meter
 
@@ -95,7 +113,7 @@ Context: 250,000 of 1,000,000 tokens (25%) · claude-haiku-5-5 · 12 message(s)
 ```
 
 - **Used** is measured from the last response's `usage`: fresh and cached input plus the output, which is what the next request starts from. Your next message and any tool results add to it.
-- **The window** comes from Anthropic's models API for Claude models (looked up once per model), and from DeepSeek's published 1M-token limit for DeepSeek. If it can't be found, the meter shows tokens only; set `CONTEXT_WINDOW` to supply it.
+- **The window** comes from Anthropic's models API for Claude models (looked up once per model), from DeepSeek's published 1M-token limit for DeepSeek, and from Gemini's published 1,048,576-token limit for Gemini. If it can't be found, the meter shows tokens only; set `CONTEXT_WINDOW` to supply it.
 - From 80% full, a warning follows the summary line. The harness never drops old messages, so a full context makes requests fail; `/reset` starts a fresh conversation.
 - After `/provider` or `/model`, the reading is marked `≈` until the next response measures it again, since providers count tokens differently (and a provider switch removes thinking blocks).
 
@@ -114,12 +132,20 @@ With `/turns unlimited` (or `MAX_TURNS=unlimited`) there is no limit on model ca
 
 ## Providers
 
-Both providers are reached with the same client, because DeepSeek serves the Anthropic Messages API at `https://api.deepseek.com/anthropic`. Pick one per run:
+| Provider | `PROVIDER` | Key | Models | How it's reached |
+| -------- | ---------- | --- | ------ | ---------------- |
+| Claude | `anthropic` (default) | `ANTHROPIC_API_KEY` | `claude-sonnet-5-5` (default), `claude-opus-5-5`, `claude-haiku-5-5`, `claude-fable-5-1`, or any other Claude model ID | Anthropic Messages API |
+| DeepSeek | `deepseek` | `DEEPSEEK_API_KEY` | `deepseek-flash` (default), `deepseek-v4-pro` | The same client: DeepSeek serves the Anthropic Messages API at `https://api.deepseek.com/anthropic` |
+| Gemini | `gemini` | `GEMINI_API_KEY` | `gemini-3.1-pro-preview` (default), `gemini-3.5-flash-lite`, `gemini-3.8-flash` | Gemini's native API at `https://generativelanguage.googleapis.com`, through a translation layer (`src/gemini/`) |
+
+Pick one per run:
 
 ```sh
 npm start                                   # Claude
 PROVIDER=deepseek npm start                 # DeepSeek, deepseek-flash
 PROVIDER=deepseek MODEL=deepseek-v4-pro npm start
+PROVIDER=gemini npm start                   # Gemini, gemini-3.1-pro-preview
+PROVIDER=gemini MODEL=gemini-3.5-flash-lite npm start
 ```
 
 The startup line shows which is in use (`harness · deepseek / deepseek-flash · ...`). Each provider only ever receives its own key.
@@ -128,9 +154,9 @@ The startup line shows which is in use (`harness · deepseek / deepseek-flash ·
 
 `/provider` and `/model` open a menu: move with ↑/↓ (or j/k), press Enter or a number to choose, Esc to cancel. A provider whose key isn't set is listed but greyed out. Without a terminal (piped input) they print the choices instead; `/provider <name>` and `/model <id>` work either way.
 
-- **The conversation carries over.** Switching provider keeps the history, with one exception: thinking blocks are removed, because each provider only accepts thinking blocks it wrote (Claude rejects DeepSeek's with a 400). Switching model within a provider keeps everything.
+- **The conversation carries over.** Switching provider keeps the history, with one exception: thinking blocks are removed, because each provider only accepts thinking blocks it wrote (Claude rejects DeepSeek's with a 400). Switching model within Claude or DeepSeek keeps everything. Switching model within Gemini also removes thinking, because a Gemini thought signature is only valid for the model that wrote it.
 - **Each provider remembers its model** for the session, so switching away and back returns to the model you were using. `MODEL` and `BASE_URL` belong to the provider named by `PROVIDER`; the other provider uses its defaults.
-- **`/model` lists the usual models.** For Claude, `/model <id>` also accepts any other model ID (Anthropic reports unknown ones clearly); for DeepSeek only the listed models are accepted.
+- **`/model` lists the usual models.** For Claude, `/model <id>` also accepts any other model ID (Anthropic reports unknown ones clearly); for DeepSeek and Gemini only the listed models are accepted.
 - Switches last for the session only. To start with them next time, run `/defaults save` (see [Saved defaults](#saved-defaults)).
 - Each switch is logged in the transcript as a `session` line with the provider, model and base URL.
 
@@ -142,6 +168,17 @@ Things to know about DeepSeek:
 - **Data goes to DeepSeek.** Your messages, and anything the tools return (workspace file contents, fetched pages), are sent to DeepSeek's servers under DeepSeek's terms.
 - DeepSeek caches repeated input automatically, so most of a long tool loop's input shows up as `cached` in the token line.
 
+Things to know about Gemini:
+
+- **It's a translation, not a pass-through.** Gemini has no Anthropic-compatible endpoint, so `src/gemini/` converts each request into Gemini's `generateContent` format (`streamGenerateContent` when streaming) and converts the response back into the same message the agent loop gets from Claude. Tool calls, tool results, streaming, thinking, retries, timeouts, Ctrl+C and the token counts all behave as they do for the other providers. Nothing outside `src/gemini/` and the client factory in `src/client.ts` knows which provider is in use.
+- **Tool schemas are sent unchanged** (as `parametersJsonSchema`), so MCP tools with complex schemas work without being rewritten.
+- **Thought signatures are kept.** Gemini 3 attaches an opaque `thoughtSignature` to its thinking and tool calls, and rejects a later request that doesn't send it back. The harness stores the signatures in the conversation history, so they survive `/thinking`, `/maxtokens`, a model switch back and forth and `--resume`. They're dropped only when you switch to a different model, as described above.
+- **Thoughts are always requested**, so the signatures come back, but they're only printed with `/thinking on`.
+- **Blocked responses are refusals.** A prompt or response Gemini blocks for safety ends the run as a refusal and is not retried.
+- **Errors and retries.** 429 and 5xx responses are retried, waiting as long as Gemini's `retryDelay` says to when it gives one. A 401 or 403, or an error that mentions the API key, includes a hint to check `GEMINI_API_KEY`.
+- **Data goes to Google.** Your messages and tool results are sent to Google's servers under the Gemini API terms.
+- Gemini caches repeated input implicitly. Cached input is reported as `cached` in the token line, separately from fresh input, as for the other providers.
+
 ## Seeing the model's thinking
 
 `/thinking on` prints the model's thinking dimmed, after a `✻`, before its answer and between tool calls. It streams as it arrives (or prints with each response when `STREAM=0`). `/thinking off` hides it again. Either way, thinking is kept in the conversation and written to the transcript.
@@ -149,6 +186,7 @@ Things to know about DeepSeek:
 What you see depends on the model:
 
 - **DeepSeek** returns its thinking as written. Nothing about the request changes.
+- **Gemini** returns thought summaries, since the harness always asks for them (`includeThoughts`). `/thinking` only decides whether they're printed.
 - **Claude 5 models** (`claude-*-5*`) think by default but return the thinking empty unless asked. With thinking shown, requests add `"thinking": {"type": "adaptive", "display": "summarized"}`, and Claude returns a summary of its reasoning, written by a separate model. Claude never returns the raw reasoning. Cost is the same either way, since the model thinks regardless; when streaming, the answer starts a little later because the summary streams first.
 - **Older Claude models** (4.8 and earlier) only think when thinking is turned on in the request, which changes cost and behaviour, so the harness doesn't do it and there is nothing to show.
 
@@ -171,7 +209,7 @@ The harness starts with the provider, model, thinking, turns and max tokens sett
 ```json
 {
   "provider": "deepseek",
-  "models": { "anthropic": "claude-haiku-5-5", "deepseek": "deepseek-v4-pro" },
+  "models": { "anthropic": "claude-haiku-5-5", "deepseek": "deepseek-v4-pro", "gemini": "gemini-3.5-flash-lite" },
   "showThinking": true,
   "maxTurns": "unlimited",
   "maxTokens": 16000
@@ -188,11 +226,12 @@ The harness starts with the provider, model, thinking, turns and max tokens sett
 
 | Variable                | Default                           | Purpose |
 | ----------------------- | --------------------------------- | ------- |
-| `PROVIDER`              | `anthropic`                       | `anthropic` or `deepseek` |
+| `PROVIDER`              | `anthropic`                       | `anthropic`, `deepseek` or `gemini` |
 | `ANTHROPIC_API_KEY`     | none                              | Key for `PROVIDER=anthropic` (required then); never logged |
 | `DEEPSEEK_API_KEY`      | none                              | Key for `PROVIDER=deepseek` (required then); never logged |
-| `MODEL`                 | per provider                      | `claude-sonnet-5-5` or `deepseek-flash` (`claude-haiku-5-5` is cheaper for testing) |
-| `BASE_URL`              | per provider                      | `https://api.anthropic.com` or `https://api.deepseek.com/anthropic` |
+| `GEMINI_API_KEY`        | none                              | Key for `PROVIDER=gemini` (required then); never logged |
+| `MODEL`                 | per provider                      | `claude-sonnet-5-5`, `deepseek-flash` or `gemini-3.1-pro-preview` (`claude-haiku-5-5` and `gemini-3.5-flash-lite` are cheaper for testing) |
+| `BASE_URL`              | per provider                      | `https://api.anthropic.com`, `https://api.deepseek.com/anthropic` or `https://generativelanguage.googleapis.com` |
 | `ANTHROPIC_MODEL`, `ANTHROPIC_BASE_URL` | none              | Older names for `MODEL` and `BASE_URL`; used only with `PROVIDER=anthropic`, and `MODEL`/`BASE_URL` win |
 | `MAX_TOKENS`            | `4096`                            | `max_tokens` per request (thinking included); `/maxtokens` changes it for the session |
 | `MAX_TURNS`             | `10`                              | Model calls per user message, or `unlimited`; `/turns` changes it for the session |
@@ -203,6 +242,7 @@ The harness starts with the provider, model, thinking, turns and max tokens sett
 | `WEB_POLICY`            | `web-policy.json`                 | Site policy for `web_fetch` (see below). If set explicitly, the file must exist |
 | `HARNESS_SETTINGS`      | `harness.json`                    | Saved defaults file (see [Saved defaults](#saved-defaults)) |
 | `MCP_CONFIG`            | `mcp.json`                        | MCP servers to start (see [MCP servers](#mcp-servers)). If set explicitly, the file must exist |
+| `HARNESS_LIBRARY_ROOT`  | `~/.harness/library`              | The self-extension library: tools, skills and MCP servers (unattended mode; see [Extending the harness at runtime](#extending-the-harness-at-runtime)) |
 | `CONTEXT_WINDOW`        | per model                         | Context window size for the meter, for models whose window isn't known |
 | `MAX_TOOL_OUTPUT_CHARS` | `8000`                            | Tool results longer than this are truncated with a visible marker |
 | `WORKSPACE_ROOT`        | current directory                 | Sandbox root for the file tools |
@@ -353,6 +393,7 @@ A fresh session loads **only the built-in tools**. Nothing from the library load
 
 - Persisted tools and MCP servers are **dormant**. They stay in the catalog and load on demand with `set_artifact_enabled`; they do not start with the session.
 - Changes the model makes (loading or unloading an item, installing a new one) apply to the current session only. Loading and unloading is not a persistable change, so it never triggers the quit-time alert.
+- Skills are the exception to "dormant": a persisted skill is listed by `list_catalog` from the start (unless you've set it not to be offered), because a listed skill costs only a line of catalog text, not tool definitions.
 - Only **new installs** (a tool, server or skill that is not yet in `manifest.json`) are persistable. The human saves them with `/library persist`. **The model has no persist tool.** If you quit with new installs that are not persisted, the harness prints an alert saying they will be gone next session.
 
 Changing the tool set rewrites the tool definitions, which resets the prompt cache, so the next turn costs more. The tool results tell the model to load or reload once, not after each edit.
@@ -366,6 +407,7 @@ Changing the tool set rewrites the tool definitions, which resets the prompt cac
 | `run_shell` + `reload_tools` | Authoring a tool: the model writes a `.ts` file into the library's `tools/` directory with `run_shell` (`write_file` cannot reach it), then `reload_tools` rescans that directory and loads every tool file, reporting which loaded and which failed, with the reason. A written tool is installed at once and loads with `reload_tools` |
 | `add_mcp_server` | Installs an MCP server (`name`, `command`, optional `args`, `env` and `description`) and starts it, registering its tools for this session. The description tells the model to prefer a reputable existing server (a Ghidra MCP, say) over building its own for anything substantial, and the optional `description` is what `list_catalog` shows for it |
 | `use_skill` | Returns a skill's `SKILL.md` by name. Skills are written how-tos: the model reads one before a task it covers |
+| `run_shell` (skills) | Authoring a skill: the model writes `skills/<name>/SKILL.md` in the library with `run_shell`, starting with a front-matter block that holds a one-line `description:`. There is no reload step (see [Skills hot-reload](#skills-hot-reload)) |
 
 **Your commands:**
 
@@ -379,6 +421,16 @@ Changing the tool set rewrites the tool definitions, which resets the prompt cac
 ```
 
 The lists mark each item `persisted` or `session-only`. `/library persist` is the only path that writes the manifest: it shows the new installs, asks once, and saves them all. Loading or unloading an item for the session is not saved by it. The commands exist only in unattended mode; in normal mode they are unknown commands. Persisting a tool copies its file into the library's `tools/` directory.
+
+#### Skills hot-reload
+
+Skills are rescanned from the library's `skills/` directory whenever they matter: on `list_catalog` and `use_skill`, on `/tools`, `/skills`, `/mcp` and `/library`, when a session is resumed, and when you quit. A rescan does three things:
+
+- **A new skill folder** joins the catalog straight away, offered and marked `session-only`, so `/library persist` can save it like a new tool or server.
+- **An edited `SKILL.md`** takes effect on the next read, and its description in the catalog is refreshed.
+- **A session-only skill whose folder was deleted** drops out of the catalog. A persisted skill is never dropped; if its folder is missing, `use_skill` says so.
+
+Skills are never in the tool set, so a rescan doesn't change the tool definitions or reset the prompt cache. A skill the model writes but never lists or reads is still found by the rescan at quit, so the unpersisted-changes alert warns about it. A persisted skill keeps whether it's offered: `/skills disable <name>` before `/library persist` saves it as not offered.
 
 In the screen, `/tools`, `/skills` and `/mcp` with no argument open a **toggle menu** of the installed items instead of printing the list. Move with ↑/↓, press **Space** to mark an item to enable or disable it, **Enter** to apply the marked changes, or **Esc** to discard them; nothing changes until you press Enter. Without a screen (piped input or `--plain`), the same commands print the list as above.
 
@@ -507,7 +559,8 @@ Restore is best effort. If a tool file is missing or an MCP server won't relaunc
 src/
   types.ts        content block, message, tool and response types
   config.ts       settings from env vars with defaults; the provider table
-  client.ts       createAnthropicClient(): fetch + timeout + retry, streaming or not
+  client.ts       createClient() picks the client by provider; createAnthropicClient(): fetch + timeout + retry, streaming or not
+  gemini/         Gemini: client.ts (native API, same contract as the Anthropic client), translate.ts (requests, responses, stream, thought signatures)
   sse.ts          SSE parsing; rebuilds the streamed message exactly as the API would return it
   registry.ts     defineTool, createRegistry, dispatch
   agent_tools.ts  assembleTools(): which tools the model gets (adds the unattended ones)
@@ -527,12 +580,14 @@ src/
   defaults_command.ts /defaults
   turns_command.ts /turns
   mcp/            MCP servers: config.ts (mcp.json), client.ts (stdio JSON-RPC), tools.ts (as harness tools), start.ts
+  library/        the self-extension library: paths, manifest, tool loader, skills, the session overlay
+  library_command.ts /tools, /skills, /mcp and /library
   tools/          workspace sandboxing, private paths, get_time, list_dir, read_file, web_fetch, web_policy
-    unattended/   run_shell and write_file (added only in unattended mode)
+    unattended/   run_shell, write_file and the library tools (added only in unattended mode)
 test/             unit tests (fake model, fake fetch, temp dirs)
 ```
 
-Dependencies flow one way: `repl` → `agent` → `client` and `registry` → `tools`. `agent.ts` depends only on the `ModelFn` type, so another provider can be added as a new client without touching the loop. DeepSeek didn't need one: it speaks the same protocol, so `config.ts` just picks its key, base URL and model.
+Dependencies flow one way: `repl` → `agent` → `client` and `registry` → `tools`. `agent.ts` depends only on the `ModelFn` type, so another provider can be added as a new client without touching the loop. DeepSeek didn't need one: it speaks the same protocol, so `config.ts` just picks its key, base URL and model. Gemini did: `src/gemini/client.ts` implements the same `ModelFn` and `ClientHooks` contract over Gemini's native API, and `createClient()` in `client.ts` chooses it when `provider` is `gemini`.
 
 Streaming lives entirely in the client. It rebuilds the stream into the same message object a non-streaming request returns, including thinking signatures and tool inputs, so the agent loop and history handling are identical in both modes. A stream that fails before any text is shown is retried; one that fails after text has appeared is reported as an error instead, so an answer is never printed twice. An unknown delta type is an error rather than being skipped, because a block that can't be rebuilt exactly would corrupt the history.
 

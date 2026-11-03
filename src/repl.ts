@@ -590,6 +590,13 @@ async function main(): Promise<void> {
   // they are lost next session unless persisted with /library.
   const unpersistedLibraryAlert = (): string | undefined => {
     if (!librarySession) return undefined;
+    // Catch a skill the model wrote but never listed or read. Synchronous: quit() can't await.
+    // A failed scan must never block quitting; the alert then covers what is already known.
+    try {
+      librarySession.reloadSkillsSync();
+    } catch {
+      // keep going
+    }
     const d = librarySession.diff();
     if (d.added.length === 0) return undefined;
     return "⚠ This session has unpersisted library changes (see /library). They are not saved to the library and will be gone next session.";
@@ -695,6 +702,15 @@ async function main(): Promise<void> {
   const runLibraryCommand = async (input: string): Promise<void> => {
     const session = librarySession!;
     const action = parseLibraryCommand(input);
+    // Pick up skills the model wrote (or edited) since the last scan, so lists, toggles and
+    // /library persist see them. Cheap, and skills never touch the tool set or the prompt cache.
+    if (action.type !== "error") {
+      try {
+        await session.reloadSkills();
+      } catch (err) {
+        say(`Could not rescan skills in ${session.skillsDir}: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
     switch (action.type) {
       case "error":
         say(action.message);

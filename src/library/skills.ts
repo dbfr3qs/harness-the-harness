@@ -1,3 +1,4 @@
+import { readFileSync, readdirSync } from "node:fs";
 import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -36,14 +37,44 @@ export async function scanSkillsDir(dir: string): Promise<SkillInfo[]> {
   for (const ent of entries) {
     if (!ent.isDirectory()) continue;
     const skillDir = join(dir, ent.name);
-    try {
-      const text = await readFile(join(skillDir, "SKILL.md"), "utf8");
-      out.push({ name: ent.name, description: describe(text), dir: skillDir });
-    } catch (e) {
-      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw e;
-    }
+    const text = await readFile(join(skillDir, "SKILL.md"), "utf8").catch(missingAsUndefined);
+    if (text !== undefined) out.push({ name: ent.name, description: describe(text), dir: skillDir });
   }
-  return out.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+  return sortByName(out);
+}
+
+/** scanSkillsDir, synchronously: for the quit path, which cannot wait. */
+export function scanSkillsDirSync(dir: string): SkillInfo[] {
+  let entries;
+  try {
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw e;
+  }
+  const out: SkillInfo[] = [];
+  for (const ent of entries) {
+    if (!ent.isDirectory()) continue;
+    const skillDir = join(dir, ent.name);
+    let text: string | undefined;
+    try {
+      text = readFileSync(join(skillDir, "SKILL.md"), "utf8");
+    } catch (e) {
+      text = missingAsUndefined(e);
+    }
+    if (text !== undefined) out.push({ name: ent.name, description: describe(text), dir: skillDir });
+  }
+  return sortByName(out);
+}
+
+// A folder without a SKILL.md is not a skill; any other read error is real.
+function missingAsUndefined(e: unknown): undefined {
+  if ((e as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+  throw e;
+}
+
+function sortByName(skills: SkillInfo[]): SkillInfo[] {
+  return skills.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
 }
 
 /** The text of `<dir>/<name>/SKILL.md`. */

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createLibrarySession } from "../src/library/session.ts";
@@ -418,4 +418,108 @@ test("restore warns on a content-hash mismatch but still loads the tool", async 
   assert.equal(res.warnings.length, 1);
   assert.match(res.warnings[0], /ok.*(changed|hash)/s);
   assert.ok(b.registry.has("ok"));
+});
+
+// ---- skills: hot reload -------------------------------------------------------
+
+async function writeSkill(root: string, name: string, description: string, body = "Do the thing.") {
+  const dir = join(root, "skills", name);
+  await mkdir(dir, { recursive: true });
+  await writeFile(join(dir, "SKILL.md"), `---\nname: ${name}\ndescription: ${description}\n---\n\n# ${name}\n${body}\n`);
+}
+
+test("reloadSkills discovers a newly written skill as offered and session-only, without touching the registry", async () => {
+  const root = await tmp();
+  const { session, registry } = await makeSession({ root });
+  assert.deepEqual(session.inventory(), []);
+  await writeSkill(root, "triage", "Triage bug reports");
+  const res = await session.reloadSkills();
+  assert.deepEqual(res, { added: ["triage"], updated: [], removed: [] });
+  assert.deepEqual(session.inventory(), [{ kind: "skill", name: "triage", enabled: true, persisted: false, description: "Triage bug reports" }]);
+  assert.deepEqual(session.diff(), { added: [{ kind: "skill", name: "triage" }] });
+  assert.deepEqual(registry.names(), [], "skills never enter the tool set");
+  assert.match(await session.readSkill("triage"), /Do the thing/);
+});
+
+test("reloadSkills refreshes an edited description and keeps the offered flag", async () => {
+  const root = await tmp();
+  const { session } = await makeSession({ root });
+  await writeSkill(root, "triage", "old");
+  await session.reloadSkills();
+  await session.setEnabled("skill", "triage", false);
+  await writeSkill(root, "triage", "new");
+  const res = await session.reloadSkills();
+  assert.deepEqual(res, { added: [], updated: ["triage"], removed: [] });
+  assert.deepEqual(session.inventory(), [{ kind: "skill", name: "triage", enabled: false, persisted: false, description: "new" }]);
+  assert.deepEqual(await session.reloadSkills(), { added: [], updated: [], removed: [] }, "an unchanged rescan reports nothing");
+});
+
+test("reloadSkills drops a session-added skill whose folder is gone, but keeps a persisted one", async () => {
+  const root = await tmp();
+  const manifest: Manifest = { entries: [{ kind: "skill", name: "kept", description: "persisted", enabled: true }] };
+  const { session } = await makeSession({ root, manifest });
+  await writeSkill(root, "temp", "temporary");
+  await session.reloadSkills();
+  await rm(join(root, "skills", "temp"), { recursive: true });
+  const res = await session.reloadSkills();
+  assert.deepEqual(res, { added: [], updated: [], removed: ["temp"] });
+  assert.deepEqual(session.inventory().map((i) => i.name), ["kept"]);
+});
+
+test("a discovered skill persists to the manifest with its offered flag and description", async () => {
+  const root = await tmp();
+  const { session, deps } = await makeSession({ root });
+  await writeSkill(root, "triage", "Triage bug reports");
+  await session.reloadSkills();
+  await session.persist(session.diff().added, deps.paths.manifestPath);
+  const saved = await loadManifest(deps.paths.manifestPath);
+  assert.deepEqual(saved.entries, [{ kind: "skill", name: "triage", description: "Triage bug reports", enabled: true }]);
+  assert.deepEqual(session.diff(), { added: [] });
+  // A new session seeds it from the manifest, offered.
+  const b = await makeSession({ root, manifest: saved });
+  assert.deepEqual(b.session.inventory(), [{ kind: "skill", name: "triage", enabled: true, persisted: true, description: "Triage bug reports" }]);
+});
+
+test("persisting a session-added skill whose folder was deleted fails clearly", async () => {
+  const root = await tmp();
+  const { session, deps } = await makeSession({ root });
+  await writeSkill(root, "temp", "temporary");
+  await session.reloadSkills();
+  await rm(join(root, "skills", "temp"), { recursive: true });
+  await assert.rejects(session.persist([{ kind: "skill", name: "temp" }], deps.paths.manifestPath), /temp.*SKILL\.md/s);
+});
+
+test("restore finds a session-added skill still on disk and keeps its offered flag; warns when it is gone", async () => {
+  const root = await tmp();
+  await writeSkill(root, "here", "still here");
+  const snap: LibrarySnapshot = {
+    tools: [],
+    mcps: [],
+    skills: [
+      { name: "here", offered: false, sessionAdded: true },
+      { name: "gone", offered: true, sessionAdded: true },
+    ],
+  };
+  const b = await makeSession({ root });
+  const res = await b.session.restore(snap);
+  assert.deepEqual(b.session.inventory(), [{ kind: "skill", name: "here", enabled: false, persisted: false, description: "still here" }]);
+  assert.equal(res.warnings.length, 1);
+  assert.match(res.warnings[0], /gone/);
+});
+
+test("session exposes the absolute skills directory", async () => {
+  const root = await tmp();
+  const { session } = await makeSession({ root });
+  assert.equal(session.skillsDir, join(root, "skills"));
+});
+
+test("reloadSkillsSync finds a skill the model wrote but never listed, so the quit alert sees it", async () => {
+  const root = await tmp();
+  const { session } = await makeSession({ root });
+  await writeSkill(root, "late", "written just before quitting");
+  assert.deepEqual(session.diff(), { added: [] }, "not seen until a rescan");
+  assert.deepEqual(session.reloadSkillsSync(), { added: ["late"], updated: [], removed: [] });
+  assert.deepEqual(session.diff(), { added: [{ kind: "skill", name: "late" }] });
+  await rm(join(root, "skills", "late"), { recursive: true });
+  assert.deepEqual(session.reloadSkillsSync(), { added: [], updated: [], removed: ["late"] });
 });

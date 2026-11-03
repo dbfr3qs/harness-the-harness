@@ -114,10 +114,17 @@ export function createLibraryTools(session: LibrarySession): Tool[] {
     name: "list_catalog",
     description:
       "List what is installed in the library catalog: tools and MCP servers (each marked [loaded] in the live tool set or [available] to load with set_artifact_enabled) and skills. " +
-      "A skill is a written how-to; read one with use_skill before a task it covers.",
+      "A skill is a written how-to; read one with use_skill before a task it covers. " +
+      skillAuthoring(session.skillsDir),
     input_schema: { type: "object", properties: {} },
     handler: async () => {
       const lines: string[] = [];
+      let rescanError: string | undefined;
+      try {
+        await session.reloadSkills();
+      } catch (err) {
+        rescanError = err instanceof Error ? err.message : String(err);
+      }
       for (const row of session.inventory()) {
         const desc = row.description ? `: ${row.description}` : "";
         if (row.kind === "skill") {
@@ -126,13 +133,15 @@ export function createLibraryTools(session: LibrarySession): Tool[] {
           lines.push(`${row.kind} ${row.name} [${row.enabled ? "loaded" : "available"}]${desc}`);
         }
       }
+      if (rescanError) lines.push(`(Note: could not rescan the skills directory ${session.skillsDir}: ${rescanError}. Skills shown may be out of date.)`);
       return lines.length ? lines.join("\n") : "No tools, servers, or skills are installed yet.";
     },
   });
 
   const useSkill = defineTool({
     name: "use_skill",
-    description: "Read a skill's instructions (its SKILL.md) by name. Use list_catalog first to see the available names.",
+    description:
+      "Read a skill's instructions (its SKILL.md) by name. Use list_catalog first to see the available names. " + skillAuthoring(session.skillsDir),
     input_schema: {
       type: "object",
       properties: { name: { type: "string", description: "The skill's name, exactly as list_catalog shows it" } },
@@ -145,9 +154,21 @@ export function createLibraryTools(session: LibrarySession): Tool[] {
       if (name.includes("/") || name.includes("\\") || name === ".." || name.split(/[\\/]/).includes("..")) {
         throw new Error(`"${name}" is not a skill name: it contains a path separator or "..". Use a plain name as shown by list_catalog, such as "writing".`);
       }
+      // Rescan first so a skill written this session joins the catalog. A failed rescan must not
+      // block the read: readSkill goes to the file directly and reports a missing one itself.
+      await session.reloadSkills().catch(() => undefined);
       return session.readSkill(name);
     },
   });
 
   return [reloadTools, addMcpServer, setArtifactEnabled, listCatalog, useSkill];
+}
+
+// How the model writes a skill. Shared by list_catalog and use_skill so the model sees it either way.
+function skillAuthoring(skillsDir: string): string {
+  return (
+    `To write a skill, create ${skillsDir}/<name>/SKILL.md with run_shell (write_file cannot reach it), starting with ` +
+    "a front-matter block holding a one-line `description:`; it is picked up automatically the next time list_catalog or use_skill runs, " +
+    "and edits take effect the same way. A skill costs no context until it is read. It lasts only this session unless the user persists it."
+  );
 }

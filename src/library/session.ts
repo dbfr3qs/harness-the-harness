@@ -1,12 +1,12 @@
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { copyFile } from "node:fs/promises";
+import { access, copyFile } from "node:fs/promises";
 import { basename, isAbsolute, join, relative, resolve } from "node:path";
 import type { Tool } from "../registry.ts";
 import type { McpServerConfig } from "../mcp/config.ts";
 import type { StartedServer } from "../mcp/start.ts";
 import { loadToolFile, scanToolsDir, type ToolFactoryDeps } from "./loader.ts";
-import { readSkill } from "./skills.ts";
+import { readSkill, scanSkillsDir, scanSkillsDirSync, type SkillInfo } from "./skills.ts";
 import { saveManifest, type ArtifactKind, type Manifest, type ManifestEntry } from "./manifest.ts";
 import type { LibraryPaths } from "./paths.ts";
 
@@ -24,11 +24,27 @@ export interface LibrarySnapshot {
   skills: { name: string; offered: boolean; sessionAdded: boolean }[];
 }
 
+export interface SkillRescan {
+  added: string[];
+  updated: string[];
+  removed: string[];
+}
+
 export interface LibrarySession {
   /** Absolute path of the tools directory, where authored tool files belong. */
   readonly toolsDir: string;
+  /** Absolute path of the skills directory, where authored skills (<name>/SKILL.md) belong. */
+  readonly skillsDir: string;
   /** Scan toolsDir and (re)load every tool file into the registry. Does not touch the manifest. */
   reloadTools(): Promise<{ loaded: string[]; failed: { file: string; error: string }[] }>;
+  /**
+   * Rescan skillsDir: a new skill folder joins the catalog (offered, session-only), an edited one's
+   * description is refreshed, and a session-added one whose folder is gone drops out. Persisted
+   * skills are never dropped. Skills are not tools, so this never touches the registry.
+   */
+  reloadSkills(): Promise<SkillRescan>;
+  /** reloadSkills, synchronously: for the quit-time alert, which runs where nothing can be awaited. */
+  reloadSkillsSync(): SkillRescan;
   /** Start a server, register its tools, track the handle. Throws (adding nothing) on failure. */
   addServer(server: McpServerConfig, description?: string): Promise<{ tools: string[]; instructions?: string }>;
   /** Session-only enable/disable. Returns a human-readable line. */
@@ -70,6 +86,7 @@ interface McpRec {
 export async function createLibrarySession(deps: LibrarySessionDeps): Promise<LibrarySession> {
   const { paths, registry, toolDeps, startServer } = deps;
   const toolsDir = resolve(paths.toolsDir);
+  const skillsDir = resolve(paths.skillsDir);
 
   const tools = new Map<string, ToolRec>();
   const skills = new Map<string, SkillRec>();
@@ -130,8 +147,42 @@ export async function createLibrarySession(deps: LibrarySessionDeps): Promise<Li
     rec.enabled = false;
   }
 
+  // Fold one scan of skillsDir into the catalog (see LibrarySession.reloadSkills).
+  function applySkillScan(found: SkillInfo[]): SkillRescan {
+    const added: string[] = [];
+    const updated: string[] = [];
+    const removed: string[] = [];
+    const onDisk = new Set(found.map((s) => s.name));
+    for (const { name, description } of found) {
+      const rec = skills.get(name);
+      if (!rec) {
+        // Written this session (or left over from an earlier, unpersisted one): offered at once.
+        skills.set(name, { enabled: true, persisted: false, description });
+        added.push(name);
+      } else if (rec.description !== description) {
+        rec.description = description;
+        updated.push(name);
+      }
+    }
+    for (const [name, rec] of skills) {
+      if (!rec.persisted && !onDisk.has(name)) {
+        skills.delete(name);
+        removed.push(name);
+      }
+    }
+    return { added, updated, removed };
+  }
+
   const session: LibrarySession = {
     toolsDir,
+    skillsDir,
+    async reloadSkills() {
+      return applySkillScan(await scanSkillsDir(skillsDir));
+    },
+    reloadSkillsSync() {
+      return applySkillScan(scanSkillsDirSync(skillsDir));
+    },
+
     async reloadTools() {
       const loaded: string[] = [];
       const failed: { file: string; error: string }[] = [];
@@ -325,6 +376,12 @@ export async function createLibrarySession(deps: LibrarySessionDeps): Promise<Li
 
     async restore(snap) {
       const warnings: string[] = [];
+      // Find skills written in the saved session that are still on disk, so their flags restore.
+      try {
+        await session.reloadSkills();
+      } catch (err) {
+        warnings.push(`could not rescan skills in ${skillsDir}: ${message(err)}`);
+      }
       // Dormant inserts first, so everything is known before anything loads.
       for (const t of snap.tools) {
         if (t.sessionAdded && !tools.has(t.name)) {
@@ -420,7 +477,16 @@ export async function createLibrarySession(deps: LibrarySessionDeps): Promise<Li
     if (kind === "skill") {
       const rec = skills.get(name);
       if (!rec) throw new Error(`Cannot persist skill "${name}": it is not in this session.`);
-      return { kind: "skill", name, description: rec.description, enabled: false };
+      if (!rec.persisted) {
+        const file = join(skillsDir, name, "SKILL.md");
+        try {
+          await access(file);
+        } catch {
+          throw new Error(`Cannot persist skill "${name}": ${file} no longer exists.`);
+        }
+      }
+      // A skill's flag means "offered": keep what this session has, so a saved skill stays offered.
+      return { kind: "skill", name, description: rec.description, enabled: rec.enabled };
     }
     const rec = mcps.get(name);
     if (!rec) throw new Error(`Cannot persist MCP server "${name}": it is not in this session.`);
