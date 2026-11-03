@@ -153,7 +153,7 @@ export function createGeminiClient(config: ClientConfig, hooks: ClientHooks = {}
           throw new FatalStreamError(`${label} API error in stream: ${msg}`);
         }
         if (timing && ev.usageMetadata?.promptTokenCount !== undefined) inputTokens = ev.usageMetadata.promptTokenCount - (ev.usageMetadata.cachedContentTokenCount ?? 0);
-        if (ev.candidates?.[0]?.finishReason) sawFinish = true;
+        if (ev.candidates?.[0]?.finishReason || ev.promptFeedback?.blockReason) sawFinish = true; // a blocked prompt ends the stream with no finishReason
         const out = acc.push(ev);
         const thinking = config.showThinking && hooks.onThinkingDelta ? out.thinkingDelta : undefined;
         if (timing && firstAt === undefined && (out.textDelta || out.thinkingDelta)) {

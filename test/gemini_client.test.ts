@@ -190,3 +190,14 @@ test("onFirstToken.inputTokens excludes cached tokens", async () => {
   await c(req);
   assert.equal(got.inputTokens, 6);
 });
+
+test("a stream blocked by promptFeedback returns a refusal without retrying", async () => {
+  let calls = 0;
+  const c = createGeminiClient({ ...cfg, stream: true, maxRetries: 2 }, {}, {
+    fetch: (async () => (calls++, sse({ promptFeedback: { blockReason: "SAFETY" } }))) as any,
+    sleep: async () => {},
+  });
+  const r = await c(req);
+  assert.equal(r.stop_reason, "refusal");
+  assert.equal(calls, 1);
+});
