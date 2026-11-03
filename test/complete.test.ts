@@ -18,7 +18,7 @@ test("ordinary messages are never completed", () => {
 });
 
 test("/provider and /model complete their arguments", () => {
-  assert.deepEqual(complete("/provider "), [["anthropic ", "deepseek "], ""]);
+  assert.deepEqual(complete("/provider "), [["anthropic ", "deepseek ", "gemini "], ""]);
   assert.deepEqual(complete("/provider d"), [["deepseek "], "d"]);
   assert.deepEqual(complete("/model deepseek-v"), [["deepseek-v4-pro "], "deepseek-v"]);
   assert.deepEqual(complete("/model deepseek-flash "), [[], ""], "nothing after the model");
