@@ -1,6 +1,7 @@
 import { PROVIDERS } from "./config.ts";
 import type { Config } from "./config.ts";
 import { createMessageAccumulator, parseSse, StreamErrorEvent, StreamProtocolError } from "./sse.ts";
+import { createGeminiClient } from "./gemini/client.ts";
 import type { MessageResponse, ModelFn, ModelRequest } from "./types.ts";
 
 export type ClientConfig = Pick<
@@ -229,6 +230,11 @@ export function createAnthropicClient(
   };
 }
 
+/** Builds the model client for the configured provider. */
+export function createClient(config: ClientConfig, hooks: ClientHooks = {}, deps: ClientDeps = {}): ModelFn {
+  return config.provider === "gemini" ? createGeminiClient(config, hooks, deps) : createAnthropicClient(config, hooks, deps);
+}
+
 export interface ModelLimits {
   contextWindow?: number; // max input tokens
   maxOutput?: number; // the most max_tokens can be
@@ -269,7 +275,7 @@ export function returnsThinkingOnRequest(provider: Config["provider"], model: st
 }
 
 // Resolves when `signal` aborts; never resolves without one.
-function aborted(signal: AbortSignal | undefined): Promise<void> {
+export function aborted(signal: AbortSignal | undefined): Promise<void> {
   return new Promise((resolve) => {
     if (!signal) return;
     if (signal.aborted) return resolve();
@@ -277,13 +283,13 @@ function aborted(signal: AbortSignal | undefined): Promise<void> {
   });
 }
 
-function backoff(n: number): number {
+export function backoff(n: number): number {
   const base = BASE_DELAY_MS * 2 ** n;
   return Math.round(base * (0.5 + Math.random())); // jitter: 0.5x to 1.5x
 }
 
 // retry-after is either delay-seconds or an HTTP date.
-function parseRetryAfter(value: string | null): number | undefined {
+export function parseRetryAfter(value: string | null): number | undefined {
   if (!value) return undefined;
   const seconds = Number(value);
   if (Number.isFinite(seconds) && seconds >= 0) return Math.round(seconds * 1000);
@@ -292,7 +298,7 @@ function parseRetryAfter(value: string | null): number | undefined {
   return undefined;
 }
 
-function describeNetworkError(err: unknown, timeoutMs: number): string {
+export function describeNetworkError(err: unknown, timeoutMs: number): string {
   if (err instanceof Error) {
     if (err.name === "TimeoutError" || err.name === "AbortError") return `timed out (no data for ${timeoutMs} ms)`;
     const cause = err.cause instanceof Error ? `: ${err.cause.message}` : "";

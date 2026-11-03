@@ -91,7 +91,10 @@ export async function runModelCommand(args: string, ctx: ModelCommandContext): P
     throw err;
   }
   ctx.lastModel.set(current.provider, model);
-  return { output: `Model: ${current.provider} / ${model}. History kept.`, settings: { ...current, model } };
+  // A Gemini thoughtSignature is only valid for the model that wrote it.
+  const thinkingRemoved = current.provider === "gemini" ? removeThinking(ctx.messages) : 0;
+  const history = thinkingRemoved ? `History kept; ${thinkingRemoved} thinking block(s) removed, since only the model that wrote them accepts them.` : "History kept.";
+  return { output: `Model: ${current.provider} / ${model}. ${history}`, settings: { ...current, model } };
 }
 
 /** Removes thinking blocks from assistant messages in place; returns how many were removed. */

@@ -51,6 +51,7 @@ test("/provider opens a menu of providers, starting on the current one", async (
   assert.deepEqual(t.menus[0]!.items.map((i) => [i.value, i.hint, i.disabled]), [
     ["anthropic", "Anthropic · current (claude-sonnet-5-5)", undefined],
     ["deepseek", "DeepSeek", undefined],
+    ["gemini", "Google Gemini", "Google Gemini · set GEMINI_API_KEY in .env to use"],
   ]);
   assert.equal(r.output, "Provider: deepseek / deepseek-flash.");
   assert.deepEqual(r.settings, { provider: "deepseek", apiKey: "sk-D", baseUrl: "https://api.deepseek.com/anthropic", model: "deepseek-flash" });
@@ -67,7 +68,7 @@ test("a provider without a key is shown but disabled, and naming it explains why
 
 test("/provider <name> switches directly; unknown and current names change nothing", async () => {
   const t = ctx();
-  assert.match((await t.provider("gemini")).output, /^Unknown provider "gemini"\. Choose one of: anthropic, deepseek$/);
+  assert.match((await t.provider("openai")).output, /^Unknown provider "openai"\. Choose one of: anthropic, deepseek, gemini$/);
   assert.match((await t.provider("anthropic")).output, /^Already using anthropic/);
   assert.equal((await t.provider("DeepSeek")).settings?.provider, "deepseek");
 });
@@ -135,9 +136,23 @@ test("without a terminal, the commands print a list and how to switch", async ()
   delete t.context.choose;
   assert.equal(
     (await t.provider()).output,
-    "Providers:\n  * anthropic  (Anthropic · current (claude-sonnet-5-5))\n    deepseek  (DeepSeek)\nUse /provider <name> to switch.",
+    "Providers:\n  * anthropic  (Anthropic · current (claude-sonnet-5-5))\n    deepseek  (DeepSeek)\n    gemini  (Google Gemini · set GEMINI_API_KEY in .env to use)\nUse /provider <name> to switch.",
   );
   const models = (await t.model()).output;
   assert.match(models, /^Anthropic models:\n  \* claude-sonnet-5-5  \(default · current\)\n/);
   assert.match(models, /\nUse \/model <id> \(any Anthropic model ID works\) to switch\.$/);
+});
+
+test("a gemini /model switch strips thinking so foreign signatures are not replayed", async () => {
+  const messages = conversation();
+  const t = ctx({ ...both, GEMINI_API_KEY: "g", PROVIDER: "gemini" }, [], messages);
+  const r = await t.model("gemini-3.8-flash");
+  assert.match(r.output, /thinking block\(s\) removed/);
+  assert.equal(removeThinking(messages), 0);
+});
+test("an anthropic /model switch keeps thinking", async () => {
+  const messages = conversation();
+  const t = ctx(both, [], messages);
+  await t.model("claude-opus-5-5");
+  assert.equal(removeThinking(messages), 2);
 });

@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import type { Settings } from "./settings.ts";
 
-export type Provider = "anthropic" | "deepseek";
+export type Provider = "anthropic" | "deepseek" | "gemini";
 
 export interface ProviderInfo {
   label: string; // for messages: "Anthropic API error: ..."
@@ -39,6 +39,18 @@ export const PROVIDERS: Record<Provider, ProviderInfo> = {
       // 1M-token context and 384K max output for both, per api-docs.deepseek.com/quick_start/pricing.
       { id: "deepseek-flash", note: "default", contextWindow: 1_000_000, maxOutput: 384_000 },
       { id: "deepseek-v4-pro", note: "larger, pricier", contextWindow: 1_000_000, maxOutput: 384_000 },
+    ],
+    strict: true,
+  },
+  gemini: {
+    label: "Google Gemini",
+    keyVar: "GEMINI_API_KEY",
+    baseUrl: "https://generativelanguage.googleapis.com",
+    defaultModel: "gemini-3.1-pro-preview",
+    models: [
+      { id: "gemini-3.1-pro-preview", note: "default", contextWindow: 1_048_576, maxOutput: 65_536 },
+      { id: "gemini-3.5-flash-lite", note: "fastest, cheapest", contextWindow: 1_048_576, maxOutput: 65_536 },
+      { id: "gemini-3.8-flash", contextWindow: 1_048_576, maxOutput: 65_536 },
     ],
     strict: true,
   },

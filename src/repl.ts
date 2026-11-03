@@ -4,7 +4,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve } from "node:pat
 import { isDeepStrictEqual } from "node:util";
 import { runAgent } from "./agent.ts";
 import type { AgentResult } from "./agent.ts";
-import { createAnthropicClient, fetchModelLimits, returnsThinkingOnRequest } from "./client.ts";
+import { createClient, fetchModelLimits, returnsThinkingOnRequest } from "./client.ts";
 import type { ModelLimits } from "./client.ts";
 import { runMaxTokensCommand } from "./max_tokens_command.ts";
 import { contextAfter, contextGauge, contextSummary, describeContext, fullWarning, WARN_AT } from "./context_meter.ts";
@@ -345,7 +345,7 @@ async function main(): Promise<void> {
     },
   };
   // Replaced when /provider or /model changes the settings.
-  let model = createAnthropicClient(config, clientHooks);
+  let model = createClient(config, clientHooks);
   const hooks: AgentHooks = {
     onResponse: (res) => {
       mdSink.flush();
@@ -566,7 +566,7 @@ async function main(): Promise<void> {
     if (limits.maxOutput && config.maxTokens > limits.maxOutput) {
       say(dim(`(max tokens lowered from ${config.maxTokens.toLocaleString("en-US")} to ${limits.maxOutput.toLocaleString("en-US")}, the most ${config.model} can write)`));
       config = { ...config, maxTokens: limits.maxOutput };
-      model = createAnthropicClient(config, clientHooks);
+      model = createClient(config, clientHooks);
     }
     updateStatus();
   };
@@ -858,7 +858,7 @@ async function main(): Promise<void> {
         config = { ...config, ...result.settings };
         windowNow = undefined;
         refreshWindow();
-        model = createAnthropicClient(config, clientHooks);
+        model = createClient(config, clientHooks);
         transcript.log("session", {
           provider: config.provider,
           model: config.model,
@@ -899,7 +899,7 @@ async function main(): Promise<void> {
       const result = runMaxTokensCommand(maxTokensCmd[1] ?? "", config.maxTokens, config.model, maxOutputNow);
       if (result.maxTokens !== undefined) {
         config = { ...config, maxTokens: result.maxTokens };
-        model = createAnthropicClient(config, clientHooks);
+        model = createClient(config, clientHooks);
         transcript.log("session", { maxTokens: config.maxTokens });
       }
       say(result.output);
@@ -923,7 +923,7 @@ async function main(): Promise<void> {
       const arg = (thinkingCmd[1] ?? "").trim().toLowerCase();
       if (arg === "on" || arg === "off") {
         config = { ...config, showThinking: arg === "on" };
-        model = createAnthropicClient(config, clientHooks);
+        model = createClient(config, clientHooks);
         transcript.log("session", { showThinking: config.showThinking });
       } else if (arg !== "") {
         say("Usage: /thinking [on|off]");
