@@ -78,7 +78,7 @@ export function createGeminiClient(config: ClientConfig, hooks: ClientHooks = {}
         if (retryableStatus(res.status)) {
           return { kind: "retry", reason: detail, retryAfterMs: parseRetryAfter(res.headers.get("retry-after")) };
         }
-        const hint = res.status === 401 || res.status === 403 ? ` (check ${keyVar})` : "";
+        const hint = res.status === 401 || res.status === 403 || /api key/i.test(text) ? ` (check ${keyVar})` : "";
         throw new Error(`${label} API error: ${detail}${hint}`);
       }
 
@@ -117,7 +117,7 @@ export function createGeminiClient(config: ClientConfig, hooks: ClientHooks = {}
     let inputTokens = 0;
     let firstAt: number | undefined;
     const failed = (reason: string): Attempt => {
-      if (shown.value) throw new Error(`${label} API stream failed after output began: ${reason}`);
+      if (shown.value) throw new FatalStreamError(`${label} API stream failed after output began: ${reason}`);
       return { kind: "retry", reason };
     };
 

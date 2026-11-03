@@ -127,3 +127,31 @@ test("createClient dispatches gemini vs anthropic by provider", async () => {
   assert.match(urls[0], /\/v1beta\/models\//);
   assert.equal(urls[1], "https://a/v1/messages");
 });
+
+test("a 400 'API key not valid' is fatal and hints at GEMINI_API_KEY", async () => {
+  let calls = 0;
+  const client = createGeminiClient({ ...cfg, maxRetries: 3 }, {}, {
+    fetch: (async () => (calls++, json({ error: { code: 400, status: "INVALID_ARGUMENT", message: "API key not valid. Please pass a valid API key." } }, 400))) as any,
+    sleep: async () => {},
+  });
+  await assert.rejects(client(req), /GEMINI_API_KEY/);
+  assert.equal(calls, 1);
+});
+
+test("an in-stream error event after output is surfaced once, cleanly", async () => {
+  let calls = 0;
+  const client = createGeminiClient({ ...cfg, stream: true, maxRetries: 2 }, { onTextDelta: () => {} }, {
+    fetch: (async () => (calls++, sse(
+      { candidates: [{ content: { parts: [{ text: "partial" }] } }] },
+      { error: { code: 503, status: "UNAVAILABLE", message: "overloaded" } },
+    ))) as any,
+    sleep: async () => {},
+  });
+  await assert.rejects(client(req), (e: Error) => {
+    assert.match(e.message, /after output began/);
+    assert.doesNotMatch(e.message, /network error/);
+    assert.equal(e.message.match(/after output began/g)!.length, 1);
+    return true;
+  });
+  assert.equal(calls, 1);
+});
