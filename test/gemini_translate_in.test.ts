@@ -35,3 +35,59 @@ test("stream accumulator folds chunks and emits deltas", () => {
   const final = acc.finish();
   assert.equal((final.content.find((b: any) => b.type === "text") as any).text, "hello");
 });
+
+const one = (parts: any[], finishReason?: string, usageMetadata?: any) =>
+  ({ candidates: [{ content: { parts }, finishReason }], usageMetadata });
+
+test("stop_reason mapping", () => {
+  assert.equal(parseGeminiResponse(one([{ text: "a" }], "MAX_TOKENS"), "m", "i").stop_reason, "max_tokens");
+  assert.equal(parseGeminiResponse(one([{ text: "a" }], "SAFETY"), "m", "i").stop_reason, "refusal");
+  assert.equal(parseGeminiResponse(one([{ text: "a" }], "STOP"), "m", "i").stop_reason, "end_turn");
+});
+
+test("a functionCall without a signature emits no companion", () => {
+  const r = parseGeminiResponse(one([{ functionCall: { id: "f", name: "run", args: {} } }], "STOP"), "m", "i");
+  assert.deepEqual(r.content, [{ type: "tool_use", id: "f", name: "run", input: {} }]);
+});
+
+test("empty non-thought text parts produce no text block", () => {
+  const r = parseGeminiResponse(one([{ text: "" }, { text: "x" }], "STOP"), "m", "i");
+  assert.deepEqual(r.content, [{ type: "text", text: "x" }]);
+  const acc = createGeminiStreamAccumulator();
+  acc.push(one([{ functionCall: { id: "f", name: "run", args: {} } }]));
+  acc.push(one([{ text: "" }]));
+  assert.ok(!acc.finish().content.some((b: any) => b.type === "text"));
+});
+
+test("stream preserves functionCall whole and retains signatures", () => {
+  const acc = createGeminiStreamAccumulator();
+  acc.push(one([{ text: "think", thought: true }]));
+  acc.push(one([{ text: "", thought: true, thoughtSignature: "T" }]));
+  acc.push(one([{ functionCall: { id: "f", name: "run", args: { a: 1 } } }]));
+  acc.push(one([{ text: "", thoughtSignature: "TRAIL" }]));
+  const c = acc.finish().content as any[];
+  assert.deepEqual(c[0], { type: "thinking", thinking: "think", thoughtSignature: "T" });
+  assert.deepEqual(c[1], { type: "tool_use", id: "f", name: "run", input: { a: 1 } });
+  assert.ok(c.some((b) => b.type === "thinking" && b.thoughtSignature === "TRAIL"));
+});
+
+test("finish applies the last chunk's usage and finishReason", () => {
+  const acc = createGeminiStreamAccumulator();
+  acc.push(one([{ text: "a" }], undefined, { promptTokenCount: 1, candidatesTokenCount: 1 }));
+  acc.push(one([{ text: "b" }], "MAX_TOKENS", { promptTokenCount: 50, candidatesTokenCount: 7, thoughtsTokenCount: 3, cachedContentTokenCount: 10 }));
+  const f = acc.finish();
+  assert.equal(f.stop_reason, "max_tokens");
+  assert.deepEqual(f.usage, { input_tokens: 40, output_tokens: 10, cache_read_input_tokens: 10 });
+});
+
+test("interleaved text/thought/text stays ordered and separate", () => {
+  const acc = createGeminiStreamAccumulator();
+  acc.push(one([{ text: "a" }]));
+  acc.push(one([{ text: "reasoning", thought: true }]));
+  acc.push(one([{ text: "b" }]));
+  assert.deepEqual(acc.finish().content, [
+    { type: "text", text: "a" },
+    { type: "thinking", thinking: "reasoning" },
+    { type: "text", text: "b" },
+  ]);
+});

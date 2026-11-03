@@ -81,7 +81,13 @@ function partsToBlocks(parts: GeminiPart[]): { blocks: AssistantBlock[]; hasCall
         if (p.thoughtSignature) b.thoughtSignature = p.thoughtSignature;
         blocks.push(b);
       } else {
-        blocks.push({ type: "text", text: p.text });
+        // Outbound paths reject empty text, so never emit an empty text block;
+        // a signature carried by this part survives as a signature-only thought.
+        if (p.text) blocks.push({ type: "text", text: p.text });
+        if (p.thoughtSignature) {
+          const sig: GeminiSignatureBlock = { type: "thinking", thinking: "", thoughtSignature: p.thoughtSignature };
+          blocks.push(sig);
+        }
       }
     }
   }
